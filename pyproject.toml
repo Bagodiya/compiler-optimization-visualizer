@@ -41,9 +41,28 @@ where = ["src"]
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+extend-exclude = [".venv", "build", "dist"]
 
 [tool.ruff.lint]
-select = ["E", "F", "W", "I", "B", "UP"]
+select = [
+    "E",     # pycodestyle errors
+    "F",     # pyflakes
+    "W",     # pycodestyle warnings
+    "I",     # isort
+    "B",     # bugbear
+    "UP",    # pyupgrade
+    "SIM",   # simplifications
+    "C4",    # comprehensions
+    "PIE",   # misc lints
+    "RET",   # return statements
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["B011"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
