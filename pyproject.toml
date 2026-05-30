@@ -66,3 +66,6 @@ indent-style = "space"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+addopts = "-ra --strict-markers"
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
