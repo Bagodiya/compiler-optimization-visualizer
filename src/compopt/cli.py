@@ -1,8 +1,12 @@
 """Command-line interface for compopt."""
 
+from pathlib import Path
+from typing import Annotated
+
 import typer
 
 from compopt import __version__
+from compopt.show import run_show
 
 app = typer.Typer(
     name="compopt",
@@ -41,6 +45,14 @@ def main(
 def version() -> None:
     """Print the compopt version."""
     typer.echo(f"compopt {__version__}")
+
+
+@app.command()
+def show(
+    path: Annotated[Path, typer.Argument(help="C source file to inspect.")],
+) -> None:
+    """Show the optimized output for a source file."""
+    run_show(path)
 
 
 if __name__ == "__main__":
