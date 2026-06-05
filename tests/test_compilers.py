@@ -52,6 +52,26 @@ def test_compile_to_asm_real(tmp_path: Path) -> None:
     assert "ret" in asm.lower()
 
 
+def test_compile_to_asm_cleans_up_temp(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    available = find_compilers()
+    if not available:
+        pytest.skip("no gcc/clang on this machine to test against")
+
+    # send all temp files into our own empty dir so we can check it after
+    tmpdir = tmp_path / "scratch"
+    tmpdir.mkdir()
+    monkeypatch.setattr(compilers.tempfile, "tempdir", str(tmpdir))
+
+    src = tmp_path / "add.c"
+    src.write_text("int add(int a, int b) { return a + b; }\n")
+    compile_to_asm(src, "1", available[0])
+
+    # the temp dir we compiled into should be gone again
+    assert list(tmpdir.iterdir()) == []
+
+
 def test_compile_to_asm_bad_source_raises(tmp_path: Path) -> None:
     available = find_compilers()
     if not available:

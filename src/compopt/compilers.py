@@ -26,12 +26,13 @@ def compile_to_asm(source: Path, level: str, compiler: str) -> str:
     """Compile one source file at a single -O level and give back the asm.
 
     `level` is just the digit, so "2" turns into -O2. We ask the compiler
-    for assembly (-S), drop it in a temp dir and read it back as text.
+    for assembly (-S), drop it in a throwaway temp dir and read it back.
+    The temp dir is removed once we have the text so nothing piles up.
     """
-    workdir = tempfile.mkdtemp(prefix="compopt-")
-    out = Path(workdir) / "out.s"
+    with tempfile.TemporaryDirectory(prefix="compopt-") as workdir:
+        out = Path(workdir) / "out.s"
 
-    cmd = [compiler, "-S", f"-O{level}", str(source), "-o", str(out)]
-    subprocess.run(cmd, check=True)
+        cmd = [compiler, "-S", f"-O{level}", str(source), "-o", str(out)]
+        subprocess.run(cmd, check=True)
 
-    return out.read_text()
+        return out.read_text()
