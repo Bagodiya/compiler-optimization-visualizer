@@ -1,12 +1,11 @@
 """Tests for compiler detection."""
 
-import subprocess
 from pathlib import Path
 
 import pytest
 
 from compopt import compilers
-from compopt.compilers import compile_to_asm, find_compilers
+from compopt.compilers import CompileError, compile_to_asm, find_compilers
 
 
 def test_returns_subset_of_known() -> None:
@@ -80,5 +79,10 @@ def test_compile_to_asm_bad_source_raises(tmp_path: Path) -> None:
     src = tmp_path / "broken.c"
     src.write_text("int main(void) { this is not c }\n")
 
-    with pytest.raises(subprocess.CalledProcessError):
+    with pytest.raises(CompileError) as excinfo:
         compile_to_asm(src, "0", available[0])
+
+    # the wrapped error should remember which compiler failed and carry
+    # the actual diagnostic text, not be empty
+    assert excinfo.value.compiler == available[0]
+    assert excinfo.value.message

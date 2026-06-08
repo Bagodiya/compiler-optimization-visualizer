@@ -6,6 +6,7 @@ from typing import Annotated
 import typer
 
 from compopt import __version__
+from compopt.compilers import CompileError
 from compopt.show import run_show
 
 app = typer.Typer(
@@ -52,7 +53,13 @@ def show(
     path: Annotated[Path, typer.Argument(help="C source file to inspect.")],
 ) -> None:
     """Show the optimized output for a source file."""
-    run_show(path)
+    try:
+        run_show(path)
+    except CompileError as err:
+        # the compiler already told us what's wrong, just pass it along
+        typer.echo(f"error: {err.compiler} could not compile {path}", err=True)
+        typer.echo(err.message, err=True)
+        raise typer.Exit(code=1) from err
 
 
 if __name__ == "__main__":
