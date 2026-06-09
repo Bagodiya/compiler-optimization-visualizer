@@ -5,7 +5,12 @@ from pathlib import Path
 import pytest
 
 from compopt import compilers
-from compopt.compilers import CompileError, compile_to_asm, find_compilers
+from compopt.compilers import (
+    CompileError,
+    compile_at_levels,
+    compile_to_asm,
+    find_compilers,
+)
 
 
 def test_returns_subset_of_known() -> None:
@@ -86,3 +91,46 @@ def test_compile_to_asm_bad_source_raises(tmp_path: Path) -> None:
     # the actual diagnostic text, not be empty
     assert excinfo.value.compiler == available[0]
     assert excinfo.value.message
+
+
+def test_compile_at_levels_defaults(tmp_path: Path) -> None:
+    available = find_compilers()
+    if not available:
+        pytest.skip("no gcc/clang on this machine to test against")
+
+    src = tmp_path / "add.c"
+    src.write_text("int add(int a, int b) { return a + b; }\n")
+
+    results = compile_at_levels(src, available[0])
+
+    # one entry per default level, each holding real-looking asm
+    assert set(results) == {"0", "1", "2", "3"}
+    for asm in results.values():
+        assert "add" in asm
+        assert "ret" in asm.lower()
+
+
+def test_compile_at_levels_custom_set(tmp_path: Path) -> None:
+    available = find_compilers()
+    if not available:
+        pytest.skip("no gcc/clang on this machine to test against")
+
+    src = tmp_path / "add.c"
+    src.write_text("int add(int a, int b) { return a + b; }\n")
+
+    results = compile_at_levels(src, available[0], levels=["0", "2"])
+
+    assert set(results) == {"0", "2"}
+
+
+def test_compile_at_levels_propagates_error(tmp_path: Path) -> None:
+    available = find_compilers()
+    if not available:
+        pytest.skip("no gcc/clang on this machine to test against")
+
+    src = tmp_path / "broken.c"
+    src.write_text("int main(void) { this is not c }\n")
+
+    # one bad level should surface as an error, not a partial dict
+    with pytest.raises(CompileError):
+        compile_at_levels(src, available[0])

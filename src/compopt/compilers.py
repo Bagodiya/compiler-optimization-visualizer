@@ -3,10 +3,14 @@
 import shutil
 import subprocess
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 # the ones we know how to drive for now
 KNOWN_COMPILERS = ["gcc", "clang"]
+
+# the optimization levels we compare by default
+DEFAULT_LEVELS = ["0", "1", "2", "3"]
 
 
 class CompileError(Exception):
@@ -54,3 +58,27 @@ def compile_to_asm(source: Path, level: str, compiler: str) -> str:
             raise CompileError(compiler, detail)
 
         return out.read_text()
+
+
+def compile_at_levels(
+    source: Path, compiler: str, levels: list[str] | None = None
+) -> dict[str, str]:
+    """Compile the same source at several -O levels and return them keyed by level.
+
+    Defaults to O0/O1/O2/O3. Each level is an independent compiler run, and
+    since those are mostly waiting on the compiler process we just fan them
+    out across a thread pool instead of doing them one after another.
+
+    If any level fails to compile the CompileError propagates — there's no
+    point showing a half-finished comparison.
+    """
+    if levels is None:
+        levels = DEFAULT_LEVELS
+
+    with ThreadPoolExecutor(max_workers=len(levels)) as pool:
+        # keep the future->level mapping so we can label results correctly
+        futures = {
+            pool.submit(compile_to_asm, source, level, compiler): level
+            for level in levels
+        }
+        return {level: fut.result() for fut, level in futures.items()}
