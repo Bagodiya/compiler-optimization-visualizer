@@ -4,6 +4,7 @@ from pathlib import Path
 
 import typer
 
+from compopt.asm import strip_directives
 from compopt.compilers import compile_at_levels, find_compilers
 
 # the level we print for now; the side-by-side view of all levels comes later
@@ -34,5 +35,5 @@ def run_show(path: Path) -> None:
     compiler = compilers[0]
     asm = compile_at_levels(path, compiler)
 
-    # nl=False so we don't tack an extra blank line onto the asm
-    typer.echo(asm[SHOW_LEVEL], nl=False)
+    # clean out the assembler bookkeeping before showing it
+    typer.echo(strip_directives(asm[SHOW_LEVEL]))
