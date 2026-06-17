@@ -1,6 +1,8 @@
 """Tests for stripping noisy assembler directives."""
 
-from compopt.asm import strip_directives
+import pytest
+
+from compopt.asm import function_names, isolate_function, strip_directives
 
 # a small but realistic chunk of gcc output with the usual noise around it
 SAMPLE = """\t.file\t"add.c"
@@ -46,3 +48,47 @@ def test_keeps_indentation_of_kept_lines() -> None:
 
 def test_empty_input_gives_empty_output() -> None:
     assert strip_directives("") == ""
+
+
+# two functions back to back, already cleaned of directives
+TWO_FUNCS = """add:
+.LFB0:
+\taddl\t%esi, %edi
+\tret
+sub:
+.LFB1:
+\tsubl\t%esi, %edi
+\tret"""
+
+
+def test_function_names_lists_top_level_labels() -> None:
+    assert function_names(TWO_FUNCS) == ["add", "sub"]
+
+
+def test_function_names_skips_local_labels() -> None:
+    # the .L labels are the compiler's own bookkeeping, not functions
+    assert ".LFB0" not in function_names(TWO_FUNCS)
+
+
+def test_isolate_first_function_by_default() -> None:
+    out = isolate_function(TWO_FUNCS)
+    assert out.startswith("add:")
+    assert "addl\t%esi, %edi" in out
+    # must not bleed into the next function
+    assert "sub:" not in out
+
+
+def test_isolate_named_function() -> None:
+    out = isolate_function(TWO_FUNCS, "sub")
+    assert out.startswith("sub:")
+    assert "subl\t%esi, %edi" in out
+    assert "add:" not in out
+
+
+def test_isolate_unknown_function_raises() -> None:
+    with pytest.raises(KeyError):
+        isolate_function(TWO_FUNCS, "nope")
+
+
+def test_isolate_returns_empty_when_no_functions() -> None:
+    assert isolate_function("\tnop\n\tret") == ""
