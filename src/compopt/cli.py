@@ -51,10 +51,14 @@ def version() -> None:
 @app.command()
 def show(
     path: Annotated[Path, typer.Argument(help="C source file to inspect.")],
+    func: Annotated[
+        str | None,
+        typer.Option("--func", "-f", help="Which function to display."),
+    ] = None,
 ) -> None:
     """Show the optimized output for a source file."""
     try:
-        run_show(path)
+        run_show(path, func)
     except CompileError as err:
         # the compiler already told us what's wrong, just pass it along
         typer.echo(f"error: {err.compiler} could not compile {path}", err=True)

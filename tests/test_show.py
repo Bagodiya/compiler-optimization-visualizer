@@ -28,6 +28,32 @@ def test_show_prints_asm(tmp_path: Path) -> None:
 
 
 @needs_compiler
+def test_show_func_picks_named_function(tmp_path: Path) -> None:
+    src = tmp_path / "two.c"
+    src.write_text(
+        "int add(int a, int b) { return a + b; }\n"
+        "int sub(int a, int b) { return a - b; }\n"
+    )
+
+    result = runner.invoke(app, ["show", str(src), "--func", "sub"])
+    assert result.exit_code == 0
+    assert "sub:" in result.stdout
+    # asking for sub shouldn't drag add along with it
+    assert "add:" not in result.stdout
+
+
+@needs_compiler
+def test_show_unknown_func_errors(tmp_path: Path) -> None:
+    src = tmp_path / "two.c"
+    src.write_text("int add(int a, int b) { return a + b; }\n")
+
+    result = runner.invoke(app, ["show", str(src), "--func", "nope"])
+    assert result.exit_code == 1
+    # the message should point the user at what's actually there
+    assert "add" in result.stdout + result.stderr
+
+
+@needs_compiler
 def test_show_bad_source_errors(tmp_path: Path) -> None:
     src = tmp_path / "broken.c"
     src.write_text("int main(void) { return }\n")  # missing value

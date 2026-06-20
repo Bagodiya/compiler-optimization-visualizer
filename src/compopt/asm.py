@@ -43,31 +43,52 @@ def strip_directives(asm: str) -> str:
     return "\n".join(kept)
 
 
-def _is_function_label(line: str) -> bool:
-    """True if a line opens a real function, e.g. ``add:``.
+def _label_name(line: str) -> str | None:
+    """Return the function name a line opens, or None if it isn't one.
 
-    A function label sits at column 0 (no indentation) and ends with a colon.
-    The compiler also drops in its own local labels like ``.LFB0:`` while it
-    works — those start with a dot, so we ignore them here. On macOS clang
-    prefixes names with an underscore (``_add:``) which is fine, that's not a
-    dot.
+    A function label sits at column 0 (no indentation) and ends with a colon,
+    e.g. ``add:``. The compiler also drops in its own local labels like
+    ``.LFB0:`` while it works — those start with a dot, so we skip them. On
+    macOS clang prefixes names with an underscore (``_add:``), tacks a comment
+    onto the same line (``_add:    ## @add``), and emits comment-only lines
+    like ``## %bb.0:``. So we strip any trailing comment first and bail on
+    lines that are pure comments.
     """
     if not line or line[0].isspace():
         # indented => it's an instruction, not a label
-        return False
-    name = line.rstrip()
+        return None
+    if line.lstrip().startswith("#"):
+        # whole line is a comment (clang's ## %bb.0:, gcc's # comments)
+        return None
+    name = line.split("#", 1)[0].rstrip()
     if not name.endswith(":"):
-        return False
+        return None
     name = name[:-1]
-    return bool(name) and not name.startswith(".")
+    if not name or name.startswith("."):
+        return None
+    return name
+
+
+def _is_function_label(line: str) -> bool:
+    """True if a line opens a real function, e.g. ``add:``."""
+    return _label_name(line) is not None
+
+
+def _matches(symbol: str, wanted: str) -> bool:
+    """Whether ``symbol`` is the function the user asked for by name.
+
+    Handles the macOS underscore prefix so ``--func add`` finds ``_add``.
+    """
+    return symbol == wanted or symbol.lstrip("_") == wanted
 
 
 def function_names(asm: str) -> list[str]:
     """Return the names of the top-level functions, in the order they show up."""
     names = []
     for line in asm.splitlines():
-        if _is_function_label(line):
-            names.append(line.rstrip()[:-1])
+        name = _label_name(line)
+        if name is not None:
+            names.append(name)
     return names
 
 
@@ -89,8 +110,9 @@ def isolate_function(asm: str, name: str | None = None) -> str:
     if name is None:
         begin = starts[0]
     else:
-        wanted = f"{name}:"
-        begin = next((i for i in starts if lines[i].rstrip() == wanted), None)
+        begin = next(
+            (i for i in starts if _matches(_label_name(lines[i]), name)), None
+        )
         if begin is None:
             raise KeyError(name)
 
