@@ -8,7 +8,7 @@ from typer.testing import CliRunner
 
 from compopt.cli import app
 from compopt.compilers import find_compilers
-from compopt.show import render_columns
+from compopt.show import ALL_LEVELS, NARROW_LEVELS, levels_for_width, render_columns
 
 runner = CliRunner()
 
@@ -103,6 +103,21 @@ def test_render_columns_shows_both_levels_distinctly() -> None:
     # each column carries its own body, side by side
     assert "pushq" in text
     assert "ret" in text
+
+
+def test_levels_for_width_wide_shows_all_four() -> None:
+    # a big terminal has room for the full -O0..-O3 comparison
+    assert levels_for_width(200) == ALL_LEVELS
+
+
+def test_levels_for_width_narrow_falls_back() -> None:
+    # too tight for four columns, so drop back to the two-level view
+    assert levels_for_width(40) == NARROW_LEVELS
+
+
+def test_levels_for_width_never_goes_below_two() -> None:
+    # even a silly-small width still gives us something to compare
+    assert len(levels_for_width(1)) >= 2
 
 
 @needs_compiler

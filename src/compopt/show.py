@@ -9,8 +9,28 @@ from rich.table import Table
 from compopt.asm import function_names, isolate_function, strip_directives
 from compopt.compilers import compile_at_levels, find_compilers
 
-# the two levels we put side by side for now; the four-column view comes later
-COLUMN_LEVELS = ["0", "2"]
+# every level we can show; the full four-column view needs a wide terminal
+ALL_LEVELS = ["0", "1", "2", "3"]
+
+# what we fall back to when there isn't room for all four
+NARROW_LEVELS = ["0", "2"]
+
+# rough number of characters one asm column needs before it starts to look
+# cramped. picked by eye from typical instruction lines like "movq -8(%rbp), %rax"
+MIN_COLUMN_WIDTH = 26
+
+
+def levels_for_width(width: int) -> list[str]:
+    """Decide which -O levels to show given how wide the terminal is.
+
+    Four columns side by side only really work on a wide screen. If we tried
+    to cram them into a narrow terminal every line would get folded and the
+    whole thing turns into soup, so below the threshold we drop back to just
+    -O0 vs -O2.
+    """
+    if width >= MIN_COLUMN_WIDTH * len(ALL_LEVELS):
+        return ALL_LEVELS
+    return NARROW_LEVELS
 
 
 def _function_body(asm: str, func: str | None) -> str:
@@ -39,8 +59,9 @@ def run_show(path: Path, func: str | None = None) -> None:
     """Entry point for `compopt show`.
 
     Compiles the file at every optimization level, then prints the assembly
-    for a single function at -O0 and -O2 side by side. Pass ``func`` to pick
-    which function; without it we just show the first one in the file.
+    for a single function side by side. On a wide terminal that's all four
+    levels (-O0..-O3); on a narrower one we show -O0 vs -O2. Pass ``func`` to
+    pick which function; without it we just show the first one in the file.
     """
     if not path.exists():
         # bail out with a non-zero exit instead of a traceback
@@ -60,8 +81,11 @@ def run_show(path: Path, func: str | None = None) -> None:
     compiler = compilers[0]
     asm = compile_at_levels(path, compiler)
 
+    console = Console()
+    levels = levels_for_width(console.width)
+
     columns = []
-    for level in COLUMN_LEVELS:
+    for level in levels:
         try:
             body = _function_body(asm[level], func)
         except KeyError:
@@ -74,4 +98,4 @@ def run_show(path: Path, func: str | None = None) -> None:
             raise typer.Exit(code=1) from None
         columns.append((f"-O{level}", body))
 
-    Console().print(render_columns(columns))
+    console.print(render_columns(columns))
