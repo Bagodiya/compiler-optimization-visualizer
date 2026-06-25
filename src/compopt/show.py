@@ -1,10 +1,12 @@
 """The show command — compiles a source file and prints its assembly."""
 
+import re
 from pathlib import Path
 
 import typer
 from rich.console import Console
 from rich.table import Table
+from rich.text import Text
 
 from compopt.asm import function_names, isolate_function, strip_directives
 from compopt.compilers import compile_at_levels, find_compilers
@@ -38,6 +40,48 @@ def _function_body(asm: str, func: str | None) -> str:
     return isolate_function(strip_directives(asm), func)
 
 
+def _highlight_line(line: str) -> Text:
+    """Colorize a single line of AT&T assembly.
+
+    The colors are just there to make the output easier to skim:
+    labels stand out, the mnemonic is one color and the operands another.
+    Anything we don't recognise is left in the default color.
+    """
+    text = Text(line)
+    stripped = line.strip()
+    if not stripped or stripped.startswith("#"):
+        # blank line or a comment the compiler left behind — leave it alone
+        return text
+
+    # clang sometimes tacks a comment onto the label line ("add:  ## @add"),
+    # so look at the code before any '#' when deciding what this line is.
+    code = stripped.split("#", 1)[0].rstrip()
+    if code.endswith(":") and ":" not in code[:-1]:
+        # a label block opener like "add:" or ".L2:" — color just the label,
+        # not whatever comment trails behind it
+        end = line.index(":") + 1
+        text.stylize("bold cyan", 0, end)
+        return text
+
+    # an instruction line: first word after the indent is the mnemonic
+    head = re.match(r"(\s*)(\w+)", line)
+    if head:
+        text.stylize("green", head.start(2), head.end(2))
+    text.highlight_regex(r"%\w+", "magenta")      # registers, e.g. %rax
+    text.highlight_regex(r"\$-?\w+", "yellow")    # immediates, e.g. $5
+    return text
+
+
+def highlight_asm(body: str) -> Text:
+    """Turn an assembly body into colored text, line by line."""
+    out = Text()
+    for i, line in enumerate(body.splitlines()):
+        if i:
+            out.append("\n")
+        out.append_text(_highlight_line(line))
+    return out
+
+
 def render_columns(columns: list[tuple[str, str]]) -> Table:
     """Lay several assembly bodies out as side-by-side columns.
 
@@ -51,7 +95,7 @@ def render_columns(columns: list[tuple[str, str]]) -> Table:
     table = Table(pad_edge=False)
     for header, _ in columns:
         table.add_column(header, overflow="fold")
-    table.add_row(*(body for _, body in columns))
+    table.add_row(*(highlight_asm(body) for _, body in columns))
     return table
 
 

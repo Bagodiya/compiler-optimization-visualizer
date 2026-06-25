@@ -8,7 +8,13 @@ from typer.testing import CliRunner
 
 from compopt.cli import app
 from compopt.compilers import find_compilers
-from compopt.show import ALL_LEVELS, NARROW_LEVELS, levels_for_width, render_columns
+from compopt.show import (
+    ALL_LEVELS,
+    NARROW_LEVELS,
+    highlight_asm,
+    levels_for_width,
+    render_columns,
+)
 
 runner = CliRunner()
 
@@ -118,6 +124,36 @@ def test_levels_for_width_narrow_falls_back() -> None:
 def test_levels_for_width_never_goes_below_two() -> None:
     # even a silly-small width still gives us something to compare
     assert len(levels_for_width(1)) >= 2
+
+
+def _styles(text) -> set[str]:
+    # the colors rich applied, as plain strings we can assert on
+    return {str(span.style) for span in text.spans}
+
+
+def test_highlight_asm_keeps_the_text() -> None:
+    body = "add:\n\tmovq %rbp, %rax"
+    # coloring must not change a single character of the assembly
+    assert highlight_asm(body).plain == body
+
+
+def test_highlight_asm_colors_instruction_tokens() -> None:
+    text = highlight_asm("\tmovq $5, %rax")
+    styles = _styles(text)
+    # mnemonic, immediate and register each get their own color
+    assert "green" in styles
+    assert "yellow" in styles
+    assert "magenta" in styles
+
+
+def test_highlight_asm_marks_labels() -> None:
+    text = highlight_asm("add:")
+    assert any("cyan" in style for style in _styles(text))
+
+
+def test_highlight_asm_leaves_comments_plain() -> None:
+    # a comment line carries no instruction, so nothing should be colored
+    assert not highlight_asm("# this is a comment").spans
 
 
 @needs_compiler
