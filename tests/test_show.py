@@ -13,6 +13,7 @@ from compopt.show import (
     NARROW_LEVELS,
     highlight_asm,
     levels_for_width,
+    line_number_gutter,
     render_columns,
 )
 
@@ -92,8 +93,9 @@ def test_show_directory_is_rejected(tmp_path: Path) -> None:
 
 def test_render_columns_keeps_headers_and_bodies() -> None:
     table = render_columns([("-O0", "add:\n\tret"), ("-O2", "add:\n\tret")])
-    assert table.columns[0].header == "-O0"
-    assert table.columns[1].header == "-O2"
+    # column 0 is the line-number gutter, so the levels start at column 1
+    assert table.columns[1].header == "-O0"
+    assert table.columns[2].header == "-O2"
 
     text = _render_to_text(table)
     assert "-O0" in text
@@ -109,6 +111,31 @@ def test_render_columns_shows_both_levels_distinctly() -> None:
     # each column carries its own body, side by side
     assert "pushq" in text
     assert "ret" in text
+
+
+def test_line_number_gutter_numbers_every_row() -> None:
+    gutter = line_number_gutter(3)
+    assert gutter.plain.split("\n") == ["1", "2", "3"]
+
+
+def test_line_number_gutter_right_aligns_numbers() -> None:
+    # once the count hits double digits the single digits get padded so the
+    # ones line up under the tens
+    lines = line_number_gutter(10).plain.split("\n")
+    assert lines[0] == " 1"
+    assert lines[9] == "10"
+
+
+def test_line_number_gutter_empty_body() -> None:
+    assert line_number_gutter(0).plain == ""
+
+
+def test_render_columns_shows_line_numbers() -> None:
+    table = render_columns([("-O0", "add:\n\tret"), ("-O2", "add:\n\tret")])
+    text = _render_to_text(table)
+    # the two-line bodies should pick up numbers 1 and 2 in the margin
+    assert "1" in text
+    assert "2" in text
 
 
 def test_levels_for_width_wide_shows_all_four() -> None:

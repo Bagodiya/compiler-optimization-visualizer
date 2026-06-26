@@ -82,6 +82,22 @@ def highlight_asm(body: str) -> Text:
     return out
 
 
+def line_number_gutter(count: int) -> Text:
+    """Build the line numbers that run down the left margin.
+
+    The numbers are right-aligned so the digits stay lined up once the count
+    rolls past 9, and dimmed because they're just a reference for pointing at a
+    row, not part of the assembly itself.
+    """
+    pad = len(str(count))
+    out = Text()
+    for n in range(1, count + 1):
+        if n > 1:
+            out.append("\n")
+        out.append(str(n).rjust(pad), style="dim")
+    return out
+
+
 def render_columns(columns: list[tuple[str, str]]) -> Table:
     """Lay several assembly bodies out as side-by-side columns.
 
@@ -89,13 +105,20 @@ def render_columns(columns: list[tuple[str, str]]) -> Table:
     column (e.g. ``-O0``) and the body is the already-cleaned assembly for a
     single function. Everything goes into one row of a rich table, which keeps
     the columns aligned to the same top edge so you can scan across the levels.
-    Lines are folded rather than cut so nothing silently disappears on a narrow
-    terminal.
+    A narrow gutter of line numbers sits on the far left so the rows are easy to
+    refer back to. Lines are folded rather than cut so nothing silently
+    disappears on a narrow terminal.
     """
     table = Table(pad_edge=False)
+    # number up to the longest body; shorter columns just run out of rows
+    rows = max((len(body.splitlines()) for _, body in columns), default=0)
+    table.add_column("", justify="right")
     for header, _ in columns:
         table.add_column(header, overflow="fold")
-    table.add_row(*(highlight_asm(body) for _, body in columns))
+    table.add_row(
+        line_number_gutter(rows),
+        *(highlight_asm(body) for _, body in columns),
+    )
     return table
 
 
