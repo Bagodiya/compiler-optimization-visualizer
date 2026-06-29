@@ -21,6 +21,11 @@ NARROW_LEVELS = ["0", "2"]
 # cramped. picked by eye from typical instruction lines like "movq -8(%rbp), %rax"
 MIN_COLUMN_WIDTH = 26
 
+# asm comes out tab-indented. rich measures a tab as one cell but draws it as
+# eight, so a short line ends up looking too wide and gets cut off for no reason.
+# turn tabs into plain spaces up front so the width we measure is the width we draw.
+TAB_WIDTH = 4
+
 
 def levels_for_width(width: int) -> list[str]:
     """Decide which -O levels to show given how wide the terminal is.
@@ -106,18 +111,21 @@ def render_columns(columns: list[tuple[str, str]]) -> Table:
     single function. Everything goes into one row of a rich table, which keeps
     the columns aligned to the same top edge so you can scan across the levels.
     A narrow gutter of line numbers sits on the far left so the rows are easy to
-    refer back to. Lines are folded rather than cut so nothing silently
-    disappears on a narrow terminal.
+    refer back to. Lines that are too wide for their column get cut off with a
+    trailing ellipsis instead of wrapping, so each instruction stays on one row
+    and lines up with its number in the gutter.
     """
     table = Table(pad_edge=False)
     # number up to the longest body; shorter columns just run out of rows
     rows = max((len(body.splitlines()) for _, body in columns), default=0)
     table.add_column("", justify="right")
     for header, _ in columns:
-        table.add_column(header, overflow="fold")
+        # no_wrap keeps a long line on a single row and ellipsis tacks on the
+        # "…" when we have to chop the end off
+        table.add_column(header, overflow="ellipsis", no_wrap=True)
     table.add_row(
         line_number_gutter(rows),
-        *(highlight_asm(body) for _, body in columns),
+        *(highlight_asm(body.expandtabs(TAB_WIDTH)) for _, body in columns),
     )
     return table
 

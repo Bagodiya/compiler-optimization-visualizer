@@ -130,6 +130,19 @@ def test_line_number_gutter_empty_body() -> None:
     assert line_number_gutter(0).plain == ""
 
 
+def test_render_columns_truncates_long_lines() -> None:
+    # a line that overruns its column should get chopped with an ellipsis
+    # instead of wrapping onto a second row
+    long_line = "movq " + "z" * 200
+    table = render_columns([("-O0", long_line), ("-O2", "ret")])
+    console = Console(width=40, record=True)
+    console.print(table)
+    text = console.export_text()
+    assert "…" in text
+    # the tail of the long line shouldn't survive the cut
+    assert "z" * 200 not in text
+
+
 def test_render_columns_shows_line_numbers() -> None:
     table = render_columns([("-O0", "add:\n\tret"), ("-O2", "add:\n\tret")])
     text = _render_to_text(table)
