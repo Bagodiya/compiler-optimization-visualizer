@@ -196,6 +196,30 @@ def test_highlight_asm_leaves_comments_plain() -> None:
     assert not highlight_asm("# this is a comment").spans
 
 
+def test_highlight_asm_no_color_drops_styling() -> None:
+    body = "\tmovq $5, %rax"
+    text = highlight_asm(body, color=False)
+    # the text survives untouched but nothing is styled
+    assert text.plain == body
+    assert not text.spans
+
+
+def test_line_number_gutter_no_color_drops_styling() -> None:
+    gutter = line_number_gutter(3, color=False)
+    assert gutter.plain.split("\n") == ["1", "2", "3"]
+    # without color the dim style shouldn't be attached to any number
+    assert not gutter.spans
+
+
+def test_render_columns_no_color_has_no_styled_cells() -> None:
+    table = render_columns([("-O0", "add:\n\tret")], color=False)
+    # every cell should come through as plain text with no spans
+    gutter = next(iter(table.columns[0].cells))
+    body = next(iter(table.columns[1].cells))
+    assert not gutter.spans
+    assert not body.spans
+
+
 @needs_compiler
 def test_show_renders_both_levels(tmp_path: Path) -> None:
     src = tmp_path / "hello.c"
@@ -206,3 +230,14 @@ def test_show_renders_both_levels(tmp_path: Path) -> None:
     # both optimization levels should be labelled in the side-by-side view
     assert "-O0" in result.stdout
     assert "-O2" in result.stdout
+
+
+@needs_compiler
+def test_show_no_color_runs_clean(tmp_path: Path) -> None:
+    src = tmp_path / "hello.c"
+    src.write_text("int add(int a, int b) { return a + b; }\n")
+
+    result = runner.invoke(app, ["show", str(src), "--no-color"])
+    assert result.exit_code == 0
+    # the asm still shows up, we've only dropped the highlighting
+    assert "add" in result.stdout

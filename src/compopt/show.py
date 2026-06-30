@@ -77,8 +77,15 @@ def _highlight_line(line: str) -> Text:
     return text
 
 
-def highlight_asm(body: str) -> Text:
-    """Turn an assembly body into colored text, line by line."""
+def highlight_asm(body: str, color: bool = True) -> Text:
+    """Turn an assembly body into text, line by line.
+
+    With ``color`` off we skip the highlighting entirely and just hand back the
+    plain assembly, which is what `--no-color` wants when the output is being
+    piped somewhere that can't deal with the escape codes.
+    """
+    if not color:
+        return Text(body)
     out = Text()
     for i, line in enumerate(body.splitlines()):
         if i:
@@ -87,23 +94,25 @@ def highlight_asm(body: str) -> Text:
     return out
 
 
-def line_number_gutter(count: int) -> Text:
+def line_number_gutter(count: int, color: bool = True) -> Text:
     """Build the line numbers that run down the left margin.
 
     The numbers are right-aligned so the digits stay lined up once the count
     rolls past 9, and dimmed because they're just a reference for pointing at a
-    row, not part of the assembly itself.
+    row, not part of the assembly itself. The dim style drops off when ``color``
+    is off so nothing carries an escape code.
     """
     pad = len(str(count))
+    style = "dim" if color else ""
     out = Text()
     for n in range(1, count + 1):
         if n > 1:
             out.append("\n")
-        out.append(str(n).rjust(pad), style="dim")
+        out.append(str(n).rjust(pad), style=style)
     return out
 
 
-def render_columns(columns: list[tuple[str, str]]) -> Table:
+def render_columns(columns: list[tuple[str, str]], color: bool = True) -> Table:
     """Lay several assembly bodies out as side-by-side columns.
 
     Each item in ``columns`` is a (header, body) pair: the header labels the
@@ -124,19 +133,20 @@ def render_columns(columns: list[tuple[str, str]]) -> Table:
         # "…" when we have to chop the end off
         table.add_column(header, overflow="ellipsis", no_wrap=True)
     table.add_row(
-        line_number_gutter(rows),
-        *(highlight_asm(body.expandtabs(TAB_WIDTH)) for _, body in columns),
+        line_number_gutter(rows, color),
+        *(highlight_asm(body.expandtabs(TAB_WIDTH), color) for _, body in columns),
     )
     return table
 
 
-def run_show(path: Path, func: str | None = None) -> None:
+def run_show(path: Path, func: str | None = None, no_color: bool = False) -> None:
     """Entry point for `compopt show`.
 
     Compiles the file at every optimization level, then prints the assembly
     for a single function side by side. On a wide terminal that's all four
     levels (-O0..-O3); on a narrower one we show -O0 vs -O2. Pass ``func`` to
     pick which function; without it we just show the first one in the file.
+    Set ``no_color`` to get plain output with the highlighting turned off.
     """
     if not path.exists():
         # bail out with a non-zero exit instead of a traceback
@@ -156,7 +166,7 @@ def run_show(path: Path, func: str | None = None) -> None:
     compiler = compilers[0]
     asm = compile_at_levels(path, compiler)
 
-    console = Console()
+    console = Console(no_color=no_color)
     levels = levels_for_width(console.width)
 
     columns = []
@@ -173,4 +183,4 @@ def run_show(path: Path, func: str | None = None) -> None:
             raise typer.Exit(code=1) from None
         columns.append((f"-O{level}", body))
 
-    console.print(render_columns(columns))
+    console.print(render_columns(columns, color=not no_color))
