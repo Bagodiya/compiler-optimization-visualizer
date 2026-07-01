@@ -59,10 +59,14 @@ def show(
         bool,
         typer.Option("--no-color", help="Disable color in the output."),
     ] = False,
+    width: Annotated[
+        int | None,
+        typer.Option("--width", help="Force the output width instead of measuring the terminal."),
+    ] = None,
 ) -> None:
     """Show the optimized output for a source file."""
     try:
-        run_show(path, func, no_color)
+        run_show(path, func, no_color, width)
     except CompileError as err:
         # the compiler already told us what's wrong, just pass it along
         typer.echo(f"error: {err.compiler} could not compile {path}", err=True)

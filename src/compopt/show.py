@@ -139,7 +139,12 @@ def render_columns(columns: list[tuple[str, str]], color: bool = True) -> Table:
     return table
 
 
-def run_show(path: Path, func: str | None = None, no_color: bool = False) -> None:
+def run_show(
+    path: Path,
+    func: str | None = None,
+    no_color: bool = False,
+    width: int | None = None,
+) -> None:
     """Entry point for `compopt show`.
 
     Compiles the file at every optimization level, then prints the assembly
@@ -147,6 +152,8 @@ def run_show(path: Path, func: str | None = None, no_color: bool = False) -> Non
     levels (-O0..-O3); on a narrower one we show -O0 vs -O2. Pass ``func`` to
     pick which function; without it we just show the first one in the file.
     Set ``no_color`` to get plain output with the highlighting turned off.
+    Pass ``width`` to force a column count instead of measuring the terminal,
+    which is handy for a fixed layout or when the output is being piped.
     """
     if not path.exists():
         # bail out with a non-zero exit instead of a traceback
@@ -166,7 +173,8 @@ def run_show(path: Path, func: str | None = None, no_color: bool = False) -> Non
     compiler = compilers[0]
     asm = compile_at_levels(path, compiler)
 
-    console = Console(no_color=no_color)
+    # width=None lets rich measure the terminal; a number pins it instead
+    console = Console(no_color=no_color, width=width)
     levels = levels_for_width(console.width)
 
     columns = []

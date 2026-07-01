@@ -241,3 +241,30 @@ def test_show_no_color_runs_clean(tmp_path: Path) -> None:
     assert result.exit_code == 0
     # the asm still shows up, we've only dropped the highlighting
     assert "add" in result.stdout
+
+
+@needs_compiler
+def test_show_wide_width_forces_all_levels(tmp_path: Path) -> None:
+    src = tmp_path / "hello.c"
+    src.write_text("int add(int a, int b) { return a + b; }\n")
+
+    # a big --width should give us the full four-column view no matter how
+    # wide the test terminal actually is
+    result = runner.invoke(app, ["show", str(src), "--width", "200"])
+    assert result.exit_code == 0
+    assert "-O1" in result.stdout
+    assert "-O3" in result.stdout
+
+
+@needs_compiler
+def test_show_narrow_width_forces_two_levels(tmp_path: Path) -> None:
+    src = tmp_path / "hello.c"
+    src.write_text("int add(int a, int b) { return a + b; }\n")
+
+    # too tight for four columns, so we should fall back to -O0 vs -O2
+    result = runner.invoke(app, ["show", str(src), "--width", "40"])
+    assert result.exit_code == 0
+    assert "-O0" in result.stdout
+    assert "-O2" in result.stdout
+    assert "-O1" not in result.stdout
+    assert "-O3" not in result.stdout
