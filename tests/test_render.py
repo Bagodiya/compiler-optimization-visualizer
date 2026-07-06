@@ -6,7 +6,7 @@ we just feed them assembly text and check what comes back out.
 
 from rich.console import Console
 
-from compopt.show import (
+from compopt.render import (
     ALL_LEVELS,
     MIN_COLUMN_WIDTH,
     NARROW_LEVELS,
