@@ -63,10 +63,14 @@ def show(
         int | None,
         typer.Option("--width", help="Force the output width instead of measuring the terminal."),
     ] = None,
+    compiler: Annotated[
+        str | None,
+        typer.Option("--compiler", "-c", help="Which compiler to use: gcc or clang."),
+    ] = None,
 ) -> None:
     """Show the optimized output for a source file."""
     try:
-        run_show(path, func, no_color, width)
+        run_show(path, func, no_color, width, compiler)
     except CompileError as err:
         # the compiler already told us what's wrong, just pass it along
         typer.echo(f"error: {err.compiler} could not compile {path}", err=True)

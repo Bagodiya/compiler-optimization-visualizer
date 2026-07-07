@@ -20,6 +20,7 @@ def run_show(
     func: str | None = None,
     no_color: bool = False,
     width: int | None = None,
+    compiler: str | None = None,
 ) -> None:
     """Entry point for `compopt show`.
 
@@ -30,6 +31,8 @@ def run_show(
     Set ``no_color`` to get plain output with the highlighting turned off.
     Pass ``width`` to force a column count instead of measuring the terminal,
     which is handy for a fixed layout or when the output is being piped.
+    Pass ``compiler`` to force gcc or clang; otherwise we use whichever we
+    find first (gcc when it's around).
     """
     if not path.exists():
         # bail out with a non-zero exit instead of a traceback
@@ -45,8 +48,16 @@ def run_show(
         typer.echo("error: could not find gcc or clang on PATH", err=True)
         raise typer.Exit(code=1)
 
-    # gcc first if it's around, otherwise whatever we found
-    compiler = compilers[0]
+    if compiler is not None:
+        # the user asked for a specific one, so only use it if it's really here
+        if compiler not in compilers:
+            typer.echo(f"error: {compiler} is not available on PATH", err=True)
+            typer.echo(f"available: {', '.join(compilers)}", err=True)
+            raise typer.Exit(code=1)
+    else:
+        # gcc first if it's around, otherwise whatever we found
+        compiler = compilers[0]
+
     asm = compile_at_levels(path, compiler)
 
     # width=None lets rich measure the terminal; a number pins it instead

@@ -116,6 +116,29 @@ def test_show_wide_width_forces_all_levels(tmp_path: Path) -> None:
 
 
 @needs_compiler
+def test_show_compiler_flag_picks_available(tmp_path: Path) -> None:
+    src = tmp_path / "hello.c"
+    src.write_text("int add(int a, int b) { return a + b; }\n")
+
+    # ask for one we know is installed and make sure it goes through
+    picked = find_compilers()[0]
+    result = runner.invoke(app, ["show", str(src), "--compiler", picked])
+    assert result.exit_code == 0
+    assert "add" in result.stdout
+
+
+@needs_compiler
+def test_show_unknown_compiler_errors(tmp_path: Path) -> None:
+    src = tmp_path / "hello.c"
+    src.write_text("int add(int a, int b) { return a + b; }\n")
+
+    # a compiler that isn't a real thing should fail before we compile anything
+    result = runner.invoke(app, ["show", str(src), "--compiler", "notacc"])
+    assert result.exit_code == 1
+    assert "notacc" in result.stdout + result.stderr
+
+
+@needs_compiler
 def test_show_narrow_width_forces_two_levels(tmp_path: Path) -> None:
     src = tmp_path / "hello.c"
     src.write_text("int add(int a, int b) { return a + b; }\n")
