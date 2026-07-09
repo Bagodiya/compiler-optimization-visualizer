@@ -1,5 +1,6 @@
 """The show command — compiles a source file and prints its assembly."""
 
+import os
 from pathlib import Path
 
 import typer
@@ -13,6 +14,37 @@ from compopt.render import levels_for_width, render_columns
 def _function_body(asm: str, func: str | None) -> str:
     """Clean one level's assembly and pull out the function we want from it."""
     return isolate_function(strip_directives(asm), func)
+
+
+def _pick_compiler(requested: str | None, available: list[str]) -> str:
+    """Work out which compiler to actually run.
+
+    An explicit --compiler wins but has to really be installed, otherwise
+    we stop. With no flag we look at $CC the same way make and configure do,
+    so `CC=clang compopt show foo.c` just works. $CC can be a bare name or a
+    full path like /usr/bin/clang, so we compare on the file name. Anything
+    we can't drive (say CC=cc) is ignored with a warning and we fall back to
+    gcc-first.
+    """
+    if requested is not None:
+        if requested not in available:
+            typer.echo(f"error: {requested} is not available on PATH", err=True)
+            typer.echo(f"available: {', '.join(available)}", err=True)
+            raise typer.Exit(code=1)
+        return requested
+
+    env_cc = os.environ.get("CC")
+    if env_cc:
+        name = Path(env_cc).name
+        if name in available:
+            return name
+        typer.echo(
+            f"warning: ignoring $CC={env_cc}, not one of: {', '.join(available)}",
+            err=True,
+        )
+
+    # gcc first if it's around, otherwise whatever we found
+    return available[0]
 
 
 def run_show(
@@ -31,8 +63,9 @@ def run_show(
     Set ``no_color`` to get plain output with the highlighting turned off.
     Pass ``width`` to force a column count instead of measuring the terminal,
     which is handy for a fixed layout or when the output is being piped.
-    Pass ``compiler`` to force gcc or clang; otherwise we use whichever we
-    find first (gcc when it's around).
+    Pass ``compiler`` to force gcc or clang. With nothing forced we honour
+    the $CC environment variable, and if that isn't set either we fall back
+    to whichever we find first (gcc when it's around).
     """
     if not path.exists():
         # bail out with a non-zero exit instead of a traceback
@@ -48,15 +81,7 @@ def run_show(
         typer.echo("error: could not find gcc or clang on PATH", err=True)
         raise typer.Exit(code=1)
 
-    if compiler is not None:
-        # the user asked for a specific one, so only use it if it's really here
-        if compiler not in compilers:
-            typer.echo(f"error: {compiler} is not available on PATH", err=True)
-            typer.echo(f"available: {', '.join(compilers)}", err=True)
-            raise typer.Exit(code=1)
-    else:
-        # gcc first if it's around, otherwise whatever we found
-        compiler = compilers[0]
+    compiler = _pick_compiler(compiler, compilers)
 
     asm = compile_at_levels(path, compiler)
 

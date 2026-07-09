@@ -7,10 +7,12 @@ command end to end and check the pieces are wired together.
 from pathlib import Path
 
 import pytest
+import typer
 from typer.testing import CliRunner
 
 from compopt.cli import app
 from compopt.compilers import find_compilers
+from compopt.show import _pick_compiler
 
 runner = CliRunner()
 
@@ -150,3 +152,39 @@ def test_show_narrow_width_forces_two_levels(tmp_path: Path) -> None:
     assert "-O2" in result.stdout
     assert "-O1" not in result.stdout
     assert "-O3" not in result.stdout
+
+
+# these poke _pick_compiler directly so they don't need a real toolchain
+
+def test_pick_compiler_flag_beats_cc(monkeypatch: pytest.MonkeyPatch) -> None:
+    # an explicit --compiler should ignore whatever $CC says
+    monkeypatch.setenv("CC", "clang")
+    assert _pick_compiler("gcc", ["gcc", "clang"]) == "gcc"
+
+
+def test_pick_compiler_uses_cc(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CC", "clang")
+    assert _pick_compiler(None, ["gcc", "clang"]) == "clang"
+
+
+def test_pick_compiler_cc_can_be_a_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    # CC is often a full path, so we match on the file name
+    monkeypatch.setenv("CC", "/usr/local/bin/clang")
+    assert _pick_compiler(None, ["gcc", "clang"]) == "clang"
+
+
+def test_pick_compiler_ignores_unusable_cc(monkeypatch: pytest.MonkeyPatch) -> None:
+    # CC=cc isn't something we know how to drive, so fall back to gcc-first
+    monkeypatch.setenv("CC", "cc")
+    assert _pick_compiler(None, ["gcc", "clang"]) == "gcc"
+
+
+def test_pick_compiler_default_when_no_cc(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("CC", raising=False)
+    assert _pick_compiler(None, ["gcc", "clang"]) == "gcc"
+
+
+def test_pick_compiler_bad_flag_exits(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("CC", raising=False)
+    with pytest.raises(typer.Exit):
+        _pick_compiler("notacc", ["gcc", "clang"])
