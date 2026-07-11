@@ -7,6 +7,7 @@ import typer
 
 from compopt import __version__
 from compopt.compilers import CompileError
+from compopt.diff import run_diff
 from compopt.show import run_show
 
 app = typer.Typer(
@@ -76,6 +77,14 @@ def show(
         typer.echo(f"error: {err.compiler} could not compile {path}", err=True)
         typer.echo(err.message, err=True)
         raise typer.Exit(code=1) from err
+
+
+@app.command()
+def diff(
+    path: Annotated[Path, typer.Argument(help="C source file to inspect.")],
+) -> None:
+    """Show what changed in the asm between two optimization levels."""
+    run_diff(path)
 
 
 if __name__ == "__main__":
