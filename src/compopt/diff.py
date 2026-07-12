@@ -1,12 +1,46 @@
 """The diff command — compare the assembly of two optimization levels.
 
-This is just the skeleton for now: it checks the source file and reports
-which two levels it will compare. The actual line diffing comes later.
+The command wiring is still the skeleton: it checks the source file and
+reports which two levels it will compare. The rendering comes later, but
+the line-diffing engine that feeds it lives here now (`diff_lines`).
 """
 
+from difflib import SequenceMatcher
 from pathlib import Path
 
 import typer
+
+
+def diff_lines(old: str, new: str) -> list[tuple[str, str]]:
+    """Line-by-line diff between two blocks of assembly.
+
+    Returns a flat list of (tag, line) pairs in the order they should be
+    shown, where tag is one of:
+
+    - "equal"  the line is the same in both
+    - "remove" the line is only in `old` (went away in `new`)
+    - "add"    the line is only in `new` (showed up going from old to new)
+
+    We lean on difflib's SequenceMatcher to find the matching runs. A
+    "replace" chunk (lines that differ on both sides) is just emitted as
+    the removals first, then the additions, which is what a normal diff
+    looks like anyway. The rendering step turns these tags into +/- later.
+    """
+    old_lines = old.splitlines()
+    new_lines = new.splitlines()
+
+    matcher = SequenceMatcher(a=old_lines, b=new_lines, autojunk=False)
+    result: list[tuple[str, str]] = []
+
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            result.extend(("equal", line) for line in old_lines[i1:i2])
+        else:
+            # replace/delete/insert: show what left, then what arrived
+            result.extend(("remove", line) for line in old_lines[i1:i2])
+            result.extend(("add", line) for line in new_lines[j1:j2])
+
+    return result
 
 
 def run_diff(path: Path, from_level: str = "0", to_level: str = "2") -> None:
