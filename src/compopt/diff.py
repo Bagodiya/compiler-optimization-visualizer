@@ -10,6 +10,10 @@ from pathlib import Path
 
 import typer
 
+# the character we put in front of each line to say what happened to it,
+# same idea as a normal `diff`/`git diff` gutter
+GUTTER = {"add": "+", "remove": "-", "equal": " "}
+
 
 def diff_lines(old: str, new: str) -> list[tuple[str, str]]:
     """Line-by-line diff between two blocks of assembly.
@@ -41,6 +45,17 @@ def diff_lines(old: str, new: str) -> list[tuple[str, str]]:
             result.extend(("add", line) for line in new_lines[j1:j2])
 
     return result
+
+
+def render_diff(diff: list[tuple[str, str]]) -> str:
+    """Turn the (tag, line) pairs from `diff_lines` into text with a gutter.
+
+    Every line gets a one-character marker in front of it: "+" for a line
+    that showed up, "-" for one that went away, and a space for a line that
+    stayed the same. That's the plain form you'd recognize from `diff`; the
+    coloring on top of it comes later.
+    """
+    return "\n".join(f"{GUTTER[tag]} {line}" for tag, line in diff)
 
 
 def run_diff(path: Path, from_level: str = "0", to_level: str = "2") -> None:

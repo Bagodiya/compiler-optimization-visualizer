@@ -11,7 +11,7 @@ from pathlib import Path
 from typer.testing import CliRunner
 
 from compopt.cli import app
-from compopt.diff import diff_lines
+from compopt.diff import diff_lines, render_diff
 
 runner = CliRunner()
 
@@ -53,6 +53,34 @@ def test_diff_lines_replace_shows_remove_then_add() -> None:
     assert tags == ["remove", "add", "equal"]
     assert result[0] == ("remove", "mov eax, 2")
     assert result[1] == ("add", "mov eax, 4")
+
+
+def test_render_diff_marks_each_line() -> None:
+    diff = [
+        ("equal", "mov eax, edi"),
+        ("remove", "mov eax, 2"),
+        ("add", "mov eax, 4"),
+    ]
+    lines = render_diff(diff).splitlines()
+    assert lines == [
+        "  mov eax, edi",
+        "- mov eax, 2",
+        "+ mov eax, 4",
+    ]
+
+
+def test_render_diff_end_to_end() -> None:
+    # feed real diff_lines output straight into the renderer
+    old = "mov eax, 2\nret"
+    new = "mov eax, 4\nret"
+    text = render_diff(diff_lines(old, new))
+    assert "- mov eax, 2" in text
+    assert "+ mov eax, 4" in text
+    assert "  ret" in text
+
+
+def test_render_diff_empty() -> None:
+    assert render_diff([]) == ""
 
 
 def test_diff_reports_levels(tmp_path: Path) -> None:
