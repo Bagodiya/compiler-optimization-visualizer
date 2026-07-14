@@ -9,10 +9,17 @@ from difflib import SequenceMatcher
 from pathlib import Path
 
 import typer
+from rich.text import Text
 
 # the character we put in front of each line to say what happened to it,
 # same idea as a normal `diff`/`git diff` gutter
 GUTTER = {"add": "+", "remove": "-", "equal": " "}
+
+# color for each kind of line once we're drawing to a real terminal. green for
+# something that showed up and red for something that went away, matching what
+# git diff does so it reads the way you'd expect. equal lines are just context
+# so they keep the default color.
+COLORS = {"add": "green", "remove": "red", "equal": ""}
 
 
 def diff_lines(old: str, new: str) -> list[tuple[str, str]]:
@@ -56,6 +63,24 @@ def render_diff(diff: list[tuple[str, str]]) -> str:
     coloring on top of it comes later.
     """
     return "\n".join(f"{GUTTER[tag]} {line}" for tag, line in diff)
+
+
+def highlight_diff(diff: list[tuple[str, str]], color: bool = True) -> Text:
+    """Colored version of `render_diff` for showing on a terminal.
+
+    Same +/- gutter as the plain form, but each line is tinted by what
+    happened to it: green for an added line, red for a removed one, and no
+    color for the lines that stayed the same. With ``color`` off we just wrap
+    the plain text so piped output doesn't carry any escape codes.
+    """
+    if not color:
+        return Text(render_diff(diff))
+    out = Text()
+    for i, (tag, line) in enumerate(diff):
+        if i:
+            out.append("\n")
+        out.append(f"{GUTTER[tag]} {line}", style=COLORS[tag])
+    return out
 
 
 def run_diff(path: Path, from_level: str = "0", to_level: str = "2") -> None:

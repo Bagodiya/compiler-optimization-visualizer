@@ -11,9 +11,14 @@ from pathlib import Path
 from typer.testing import CliRunner
 
 from compopt.cli import app
-from compopt.diff import diff_lines, render_diff
+from compopt.diff import diff_lines, highlight_diff, render_diff
 
 runner = CliRunner()
+
+
+def _styles(text) -> set[str]:
+    # the colors rich ended up attaching, as plain strings we can assert on
+    return {str(span.style) for span in text.spans}
 
 
 def test_diff_lines_identical_is_all_equal() -> None:
@@ -81,6 +86,48 @@ def test_render_diff_end_to_end() -> None:
 
 def test_render_diff_empty() -> None:
     assert render_diff([]) == ""
+
+
+def test_highlight_diff_keeps_the_gutter_text() -> None:
+    diff = [
+        ("equal", "mov eax, edi"),
+        ("remove", "mov eax, 2"),
+        ("add", "mov eax, 4"),
+    ]
+    # coloring is only skin deep — the text should match the plain renderer
+    assert highlight_diff(diff).plain == render_diff(diff)
+
+
+def test_highlight_diff_colors_added_and_removed() -> None:
+    diff = [
+        ("equal", "ret"),
+        ("remove", "mov eax, 2"),
+        ("add", "mov eax, 4"),
+    ]
+    styles = _styles(highlight_diff(diff))
+    # additions go green, removals go red
+    assert "green" in styles
+    assert "red" in styles
+
+
+def test_highlight_diff_leaves_equal_lines_uncolored() -> None:
+    # a line that didn't change is just context, so nothing should be tinted
+    text = highlight_diff([("equal", "ret")])
+    assert all(str(span.style) == "" for span in text.spans)
+
+
+def test_highlight_diff_empty() -> None:
+    text = highlight_diff([])
+    assert text.plain == ""
+    assert not text.spans
+
+
+def test_highlight_diff_no_color_drops_styling() -> None:
+    diff = [("remove", "mov eax, 2"), ("add", "mov eax, 4")]
+    text = highlight_diff(diff, color=False)
+    # the text survives but nothing is styled, same as --no-color elsewhere
+    assert text.plain == render_diff(diff)
+    assert not text.spans
 
 
 def test_diff_reports_levels(tmp_path: Path) -> None:
