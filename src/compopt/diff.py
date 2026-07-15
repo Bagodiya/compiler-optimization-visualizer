@@ -11,6 +11,8 @@ from pathlib import Path
 import typer
 from rich.text import Text
 
+from compopt.compilers import DEFAULT_LEVELS
+
 # the character we put in front of each line to say what happened to it,
 # same idea as a normal `diff`/`git diff` gutter
 GUTTER = {"add": "+", "remove": "-", "equal": " "}
@@ -83,6 +85,17 @@ def highlight_diff(diff: list[tuple[str, str]], color: bool = True) -> Text:
     return out
 
 
+def _check_level(flag: str, level: str) -> None:
+    """Stop early if a level isn't one we know how to compile.
+
+    Only the digits in DEFAULT_LEVELS are valid, so `--from 9` is caught
+    here instead of turning into a `-O9` the compiler would reject.
+    """
+    if level not in DEFAULT_LEVELS:
+        typer.echo(f"error: {flag} must be one of: {', '.join(DEFAULT_LEVELS)}", err=True)
+        raise typer.Exit(code=1)
+
+
 def run_diff(path: Path, from_level: str = "0", to_level: str = "2") -> None:
     """Entry point for `compopt diff`.
 
@@ -90,7 +103,14 @@ def run_diff(path: Path, from_level: str = "0", to_level: str = "2") -> None:
     going from one -O level to another. Right now it only validates the
     input and prints what it's going to do, so the rest of the command
     can be built on top of a command that already exists and is wired in.
+
+    The two levels are the bare digits ("0", "2"), and default to comparing
+    -O0 against -O2 since that's the pair that shows the biggest change.
     """
+    # check the flags before touching the disk, they're cheap to get wrong
+    _check_level("--from", from_level)
+    _check_level("--to", to_level)
+
     if not path.exists():
         typer.echo(f"error: no such file: {path}", err=True)
         raise typer.Exit(code=1)

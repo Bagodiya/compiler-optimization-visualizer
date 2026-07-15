@@ -141,6 +141,35 @@ def test_diff_reports_levels(tmp_path: Path) -> None:
     assert "-O2" in result.stdout
 
 
+def test_diff_uses_the_levels_it_was_given(tmp_path: Path) -> None:
+    src = tmp_path / "hello.c"
+    src.write_text("int add(int a, int b) { return a + b; }\n")
+
+    result = runner.invoke(app, ["diff", str(src), "--from", "1", "--to", "3"])
+    assert result.exit_code == 0
+    assert "-O1" in result.stdout
+    assert "-O3" in result.stdout
+    # the defaults shouldn't leak through once the flags are set
+    assert "-O0" not in result.stdout
+
+
+def test_diff_rejects_a_level_we_cant_compile(tmp_path: Path) -> None:
+    src = tmp_path / "hello.c"
+    src.write_text("int add(int a, int b) { return a + b; }\n")
+
+    result = runner.invoke(app, ["diff", str(src), "--from", "9"])
+    assert result.exit_code == 1
+
+
+def test_diff_rejects_a_bad_to_level(tmp_path: Path) -> None:
+    src = tmp_path / "hello.c"
+    src.write_text("int add(int a, int b) { return a + b; }\n")
+
+    # -Ofast and friends aren't wired up yet, so this is still an error
+    result = runner.invoke(app, ["diff", str(src), "--to", "fast"])
+    assert result.exit_code == 1
+
+
 def test_diff_missing_file(tmp_path: Path) -> None:
     missing = tmp_path / "nope.c"
 

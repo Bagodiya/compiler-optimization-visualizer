@@ -82,9 +82,18 @@ def show(
 @app.command()
 def diff(
     path: Annotated[Path, typer.Argument(help="C source file to inspect.")],
+    # "from" is a keyword so the flag name has to be spelled out here
+    from_level: Annotated[
+        str,
+        typer.Option("--from", help="Level to compare from, as a bare digit."),
+    ] = "0",
+    to_level: Annotated[
+        str,
+        typer.Option("--to", help="Level to compare to, as a bare digit."),
+    ] = "2",
 ) -> None:
     """Show what changed in the asm between two optimization levels."""
-    run_diff(path)
+    run_diff(path, from_level, to_level)
 
 
 if __name__ == "__main__":
