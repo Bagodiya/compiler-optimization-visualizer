@@ -11,7 +11,7 @@ from pathlib import Path
 from typer.testing import CliRunner
 
 from compopt.cli import app
-from compopt.diff import diff_lines, highlight_diff, render_diff
+from compopt.diff import diff_lines, highlight_diff, render_diff, trim_context
 
 runner = CliRunner()
 
@@ -130,6 +130,64 @@ def test_highlight_diff_no_color_drops_styling() -> None:
     assert not text.spans
 
 
+def _sample_diff() -> list[tuple[str, str]]:
+    # one change buried in a pile of unchanged lines, so trimming has
+    # something real to fold away
+    diff = [("equal", f"line {n}") for n in range(6)]
+    diff.append(("add", "line new"))
+    diff.extend(("equal", f"line {n}") for n in range(6, 12))
+    return diff
+
+
+def test_trim_context_keeps_lines_around_a_change() -> None:
+    trimmed = trim_context(_sample_diff(), context=2)
+    # the two equal lines on each side of the added line survive
+    assert ("equal", "line 4") in trimmed
+    assert ("equal", "line 5") in trimmed
+    assert ("add", "line new") in trimmed
+    assert ("equal", "line 6") in trimmed
+    assert ("equal", "line 7") in trimmed
+    # anything further out is gone
+    assert ("equal", "line 3") not in trimmed
+    assert ("equal", "line 8") not in trimmed
+
+
+def test_trim_context_folds_hidden_lines_into_a_gap() -> None:
+    trimmed = trim_context(_sample_diff(), context=2)
+    gaps = [line for tag, line in trimmed if tag == "gap"]
+    # four lines are hidden on each side (0-3 and 8-11)
+    assert gaps == ["4 unchanged lines", "4 unchanged lines"]
+
+
+def test_trim_context_zero_drops_all_equal_lines() -> None:
+    trimmed = trim_context(_sample_diff(), context=0)
+    assert ("add", "line new") in trimmed
+    assert not any(tag == "equal" for tag, _ in trimmed)
+
+
+def test_trim_context_negative_leaves_diff_untouched() -> None:
+    diff = _sample_diff()
+    assert trim_context(diff, context=-1) == diff
+
+
+def test_trim_context_wide_enough_hides_nothing() -> None:
+    diff = _sample_diff()
+    trimmed = trim_context(diff, context=100)
+    # nothing to fold, so no gaps and the diff comes back as-is
+    assert trimmed == diff
+
+
+def test_trim_context_gap_singular_wording() -> None:
+    diff = [("add", "x"), ("equal", "solo"), ("add", "y")]
+    trimmed = trim_context(diff, context=0)
+    assert ("gap", "1 unchanged line") in trimmed
+
+
+def test_render_diff_marks_a_gap_line() -> None:
+    text = render_diff([("gap", "4 unchanged lines")])
+    assert text == "@@ 4 unchanged lines"
+
+
 def test_diff_reports_levels(tmp_path: Path) -> None:
     src = tmp_path / "hello.c"
     src.write_text("int add(int a, int b) { return a + b; }\n")
@@ -167,6 +225,23 @@ def test_diff_rejects_a_bad_to_level(tmp_path: Path) -> None:
 
     # -Ofast and friends aren't wired up yet, so this is still an error
     result = runner.invoke(app, ["diff", str(src), "--to", "fast"])
+    assert result.exit_code == 1
+
+
+def test_diff_reports_the_context_it_will_use(tmp_path: Path) -> None:
+    src = tmp_path / "hello.c"
+    src.write_text("int add(int a, int b) { return a + b; }\n")
+
+    result = runner.invoke(app, ["diff", str(src), "--context", "5"])
+    assert result.exit_code == 0
+    assert "5 lines of context" in result.stdout
+
+
+def test_diff_rejects_negative_context(tmp_path: Path) -> None:
+    src = tmp_path / "hello.c"
+    src.write_text("int add(int a, int b) { return a + b; }\n")
+
+    result = runner.invoke(app, ["diff", str(src), "--context", "-1"])
     assert result.exit_code == 1
 
 

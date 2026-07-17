@@ -91,9 +91,13 @@ def diff(
         str,
         typer.Option("--to", help="Level to compare to, as a bare digit."),
     ] = "2",
+    context: Annotated[
+        int,
+        typer.Option("--context", "-C", help="Unchanged lines to keep around each change."),
+    ] = 3,
 ) -> None:
     """Show what changed in the asm between two optimization levels."""
-    run_diff(path, from_level, to_level)
+    run_diff(path, from_level, to_level, context)
 
 
 if __name__ == "__main__":
