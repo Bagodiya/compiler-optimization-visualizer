@@ -11,7 +11,7 @@ from pathlib import Path
 from typer.testing import CliRunner
 
 from compopt.cli import app
-from compopt.diff import diff_lines, highlight_diff, render_diff, trim_context
+from compopt.diff import diff_lines, highlight_diff, render_diff, trim_context, unified_diff
 
 runner = CliRunner()
 
@@ -188,6 +188,38 @@ def test_render_diff_marks_a_gap_line() -> None:
     assert text == "@@ 4 unchanged lines"
 
 
+def test_unified_diff_has_headers_and_a_hunk() -> None:
+    old = "mov eax, 2\nret"
+    new = "mov eax, 4\nret"
+    text = unified_diff(old, new, from_label="O0", to_label="O2")
+    # the standard unified header names both sides
+    assert "--- O0" in text
+    assert "+++ O2" in text
+    # and a hunk marker with the changed lines under it
+    assert "@@" in text
+    assert "-mov eax, 2" in text
+    assert "+mov eax, 4" in text
+    # the unchanged line stays as plain context (leading space, no marker)
+    assert " ret" in text
+
+
+def test_unified_diff_identical_is_empty() -> None:
+    # nothing changed, so there's no hunk to print and no header either
+    asm = "push rbp\nmov rbp, rsp\nret"
+    assert unified_diff(asm, asm) == ""
+
+
+def test_unified_diff_respects_context() -> None:
+    old = "\n".join(f"line {n}" for n in range(20))
+    new = old + "\ntail"
+    # one added line at the very end; with tight context the far-away lines
+    # at the top shouldn't get pulled into the hunk
+    text = unified_diff(old, new, context=1)
+    assert "+tail" in text
+    assert "line 19" in text
+    assert "line 0" not in text
+
+
 def test_diff_reports_levels(tmp_path: Path) -> None:
     src = tmp_path / "hello.c"
     src.write_text("int add(int a, int b) { return a + b; }\n")
@@ -235,6 +267,15 @@ def test_diff_reports_the_context_it_will_use(tmp_path: Path) -> None:
     result = runner.invoke(app, ["diff", str(src), "--context", "5"])
     assert result.exit_code == 0
     assert "5 lines of context" in result.stdout
+
+
+def test_diff_reports_unified_mode(tmp_path: Path) -> None:
+    src = tmp_path / "hello.c"
+    src.write_text("int add(int a, int b) { return a + b; }\n")
+
+    result = runner.invoke(app, ["diff", str(src), "--unified"])
+    assert result.exit_code == 0
+    assert "unified" in result.stdout
 
 
 def test_diff_rejects_negative_context(tmp_path: Path) -> None:

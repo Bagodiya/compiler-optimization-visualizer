@@ -95,9 +95,13 @@ def diff(
         int,
         typer.Option("--context", "-C", help="Unchanged lines to keep around each change."),
     ] = 3,
+    unified: Annotated[
+        bool,
+        typer.Option("--unified", "-u", help="Emit a standard unified diff (diff -u format)."),
+    ] = False,
 ) -> None:
     """Show what changed in the asm between two optimization levels."""
-    run_diff(path, from_level, to_level, context)
+    run_diff(path, from_level, to_level, context, unified)
 
 
 if __name__ == "__main__":

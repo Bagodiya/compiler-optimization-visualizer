@@ -6,6 +6,7 @@ the line-diffing engine that feeds it lives here now (`diff_lines`).
 """
 
 from difflib import SequenceMatcher
+from difflib import unified_diff as _unified_diff
 from pathlib import Path
 
 import typer
@@ -137,6 +138,34 @@ def highlight_diff(diff: list[tuple[str, str]], color: bool = True) -> Text:
     return out
 
 
+def unified_diff(old: str, new: str, from_label: str = "O0", to_label: str = "O2",
+                 context: int = 3) -> str:
+    """Render the change in the plain unified-diff format (`diff -u`/`git diff`).
+
+    Our own +/- gutter (`render_diff`) is easy to read but you can't feed it to
+    `patch` or paste it into a review tool. This is the portable version: the
+    familiar `--- old` / `+++ new` header followed by `@@ -a,b +c,d @@` hunks
+    with `context` unchanged lines kept around each run of changes.
+
+    I'm letting difflib do the hunk math here rather than reusing `diff_lines`,
+    since getting the line numbers in the `@@` headers right by hand is exactly
+    the kind of thing the stdlib already gets right. The labels name the two
+    sides, and we tag them with the -O level they came from so the header says
+    what's being compared.
+    """
+    old_lines = old.splitlines()
+    new_lines = new.splitlines()
+    lines = _unified_diff(
+        old_lines,
+        new_lines,
+        fromfile=from_label,
+        tofile=to_label,
+        n=context,
+        lineterm="",
+    )
+    return "\n".join(lines)
+
+
 def _check_level(flag: str, level: str) -> None:
     """Stop early if a level isn't one we know how to compile.
 
@@ -159,7 +188,8 @@ def _check_context(context: int) -> None:
         raise typer.Exit(code=1)
 
 
-def run_diff(path: Path, from_level: str = "0", to_level: str = "2", context: int = 3) -> None:
+def run_diff(path: Path, from_level: str = "0", to_level: str = "2", context: int = 3,
+             unified: bool = False) -> None:
     """Entry point for `compopt diff`.
 
     Eventually this compiles the file and shows what changed in the asm
@@ -170,7 +200,9 @@ def run_diff(path: Path, from_level: str = "0", to_level: str = "2", context: in
     The two levels are the bare digits ("0", "2"), and default to comparing
     -O0 against -O2 since that's the pair that shows the biggest change.
     `context` is how many unchanged lines to keep around each change once the
-    real rendering is wired up (see `trim_context`).
+    real rendering is wired up (see `trim_context`). When `unified` is set the
+    output uses the portable `diff -u` format (see `unified_diff`) instead of
+    our colored +/- view.
     """
     # check the flags before touching the disk, they're cheap to get wrong
     _check_level("--from", from_level)
@@ -185,7 +217,10 @@ def run_diff(path: Path, from_level: str = "0", to_level: str = "2", context: in
         typer.echo(f"error: not a file: {path}", err=True)
         raise typer.Exit(code=1)
 
-    typer.echo(
+    message = (
         f"would diff -O{from_level} against -O{to_level} for {path} "
         f"with {context} lines of context"
     )
+    if unified:
+        message += ", in unified format"
+    typer.echo(message)
