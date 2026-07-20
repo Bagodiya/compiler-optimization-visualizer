@@ -27,6 +27,9 @@ GUTTER = {"add": "+", "remove": "-", "equal": " ", "gap": "@@"}
 # git hunk header.
 COLORS = {"add": "green", "remove": "red", "equal": "", "gap": "cyan"}
 
+# what we print instead of the asm when the two levels came out the same
+IDENTICAL_MESSAGE = "no difference: both levels produced the same assembly"
+
 
 def diff_lines(old: str, new: str) -> list[tuple[str, str]]:
     """Line-by-line diff between two blocks of assembly.
@@ -109,6 +112,20 @@ def trim_context(diff: list[tuple[str, str]], context: int) -> list[tuple[str, s
     return trimmed
 
 
+def is_identical(diff: list[tuple[str, str]]) -> bool:
+    """True when the two levels compiled down to exactly the same asm.
+
+    This happens more often than you'd think — -O2 and -O3 give the same
+    output for plenty of small functions, and comparing a level against
+    itself obviously does too. Printing a wall of unchanged lines there is
+    just noise, so the renderers use this to print one line instead.
+
+    An empty diff means there was nothing to compare in the first place
+    (an empty function, say), which isn't the same thing, so that's False.
+    """
+    return bool(diff) and all(tag == "equal" for tag, _ in diff)
+
+
 def render_diff(diff: list[tuple[str, str]]) -> str:
     """Turn the (tag, line) pairs from `diff_lines` into text with a gutter.
 
@@ -116,7 +133,12 @@ def render_diff(diff: list[tuple[str, str]]) -> str:
     that showed up, "-" for one that went away, and a space for a line that
     stayed the same. That's the plain form you'd recognize from `diff`; the
     coloring on top of it comes later.
+
+    If nothing changed at all we say so in one line rather than echoing the
+    whole function back with a blank gutter (see `is_identical`).
     """
+    if is_identical(diff):
+        return IDENTICAL_MESSAGE
     return "\n".join(f"{GUTTER[tag]} {line}" for tag, line in diff)
 
 
@@ -130,6 +152,9 @@ def highlight_diff(diff: list[tuple[str, str]], color: bool = True) -> Text:
     """
     if not color:
         return Text(render_diff(diff))
+    if is_identical(diff):
+        # not a change, just a note about the run, so keep it dim
+        return Text(IDENTICAL_MESSAGE, style="dim")
     out = Text()
     for i, (tag, line) in enumerate(diff):
         if i:

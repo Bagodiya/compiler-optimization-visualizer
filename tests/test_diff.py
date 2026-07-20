@@ -11,7 +11,15 @@ from pathlib import Path
 from typer.testing import CliRunner
 
 from compopt.cli import app
-from compopt.diff import diff_lines, highlight_diff, render_diff, trim_context, unified_diff
+from compopt.diff import (
+    IDENTICAL_MESSAGE,
+    diff_lines,
+    highlight_diff,
+    is_identical,
+    render_diff,
+    trim_context,
+    unified_diff,
+)
 
 runner = CliRunner()
 
@@ -127,6 +135,44 @@ def test_highlight_diff_no_color_drops_styling() -> None:
     text = highlight_diff(diff, color=False)
     # the text survives but nothing is styled, same as --no-color elsewhere
     assert text.plain == render_diff(diff)
+    assert not text.spans
+
+
+def test_is_identical_when_nothing_changed() -> None:
+    asm = "push rbp\nmov rbp, rsp\npop rbp\nret"
+    assert is_identical(diff_lines(asm, asm))
+
+
+def test_is_identical_false_when_a_line_moved() -> None:
+    old = "mov eax, 2\nret"
+    new = "mov eax, 4\nret"
+    assert not is_identical(diff_lines(old, new))
+
+
+def test_is_identical_false_for_an_empty_diff() -> None:
+    # nothing to compare isn't the same as "compared and found no change"
+    assert not is_identical([])
+
+
+def test_render_diff_reports_identical_levels() -> None:
+    asm = "push rbp\nmov rbp, rsp\nret"
+    # one short line beats echoing the whole function back with a blank gutter
+    assert render_diff(diff_lines(asm, asm)) == IDENTICAL_MESSAGE
+
+
+def test_highlight_diff_reports_identical_levels() -> None:
+    asm = "push rbp\nret"
+    text = highlight_diff(diff_lines(asm, asm))
+    assert text.plain == IDENTICAL_MESSAGE
+    # no red or green here, nothing was added or removed
+    assert "green" not in _styles(text)
+    assert "red" not in _styles(text)
+
+
+def test_highlight_diff_identical_no_color_still_says_so() -> None:
+    asm = "push rbp\nret"
+    text = highlight_diff(diff_lines(asm, asm), color=False)
+    assert text.plain == IDENTICAL_MESSAGE
     assert not text.spans
 
 
