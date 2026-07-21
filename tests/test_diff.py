@@ -343,3 +343,115 @@ def test_diff_directory_is_rejected(tmp_path: Path) -> None:
     # a directory isn't a source file, so this should fail like a missing one
     result = runner.invoke(app, ["diff", str(tmp_path)])
     assert result.exit_code == 1
+
+
+def test_diff_lines_both_empty() -> None:
+    # nothing on either side, so there's nothing to report
+    assert diff_lines("", "") == []
+
+
+def test_diff_lines_from_empty_is_all_additions() -> None:
+    result = diff_lines("", "push rbp\nret")
+    assert result == [("add", "push rbp"), ("add", "ret")]
+
+
+def test_diff_lines_to_empty_is_all_removals() -> None:
+    result = diff_lines("push rbp\nret", "")
+    assert result == [("remove", "push rbp"), ("remove", "ret")]
+
+
+def test_diff_lines_ignores_a_trailing_newline() -> None:
+    # splitlines() already drops it, but the whole diff shifts by one if it
+    # ever stops doing that, so pin it down here
+    assert diff_lines("ret\n", "ret") == [("equal", "ret")]
+
+
+def test_highlight_diff_colors_a_gap_line() -> None:
+    text = highlight_diff([("gap", "4 unchanged lines")])
+    assert text.plain == "@@ 4 unchanged lines"
+    assert "cyan" in _styles(text)
+
+
+def test_highlight_diff_gap_no_color_keeps_the_marker() -> None:
+    text = highlight_diff([("gap", "4 unchanged lines")], color=False)
+    assert text.plain == "@@ 4 unchanged lines"
+    assert not text.spans
+
+
+def test_is_identical_false_when_lines_were_folded_away() -> None:
+    # a gap only shows up after trimming, and trimming only hides context
+    # around a real change, so this is never "no difference"
+    assert not is_identical([("gap", "4 unchanged lines"), ("add", "ret")])
+
+
+def test_trim_context_all_equal_folds_into_one_gap() -> None:
+    diff = [("equal", f"line {n}") for n in range(5)]
+    assert trim_context(diff, context=3) == [("gap", "5 unchanged lines")]
+
+
+def test_trim_context_with_no_equal_lines_adds_no_gap() -> None:
+    diff = [("remove", "mov eax, 2"), ("add", "mov eax, 4")]
+    assert trim_context(diff, context=2) == diff
+
+
+def test_trim_context_then_render_reads_like_a_diff() -> None:
+    lines = render_diff(trim_context(_sample_diff(), context=1)).splitlines()
+    assert lines == [
+        "@@ 5 unchanged lines",
+        "  line 5",
+        "+ line new",
+        "  line 6",
+        "@@ 5 unchanged lines",
+    ]
+
+
+def test_unified_diff_labels_default_to_the_usual_pair() -> None:
+    text = unified_diff("mov eax, 2\nret", "mov eax, 4\nret")
+    assert "--- O0" in text
+    assert "+++ O2" in text
+
+
+def test_unified_diff_from_empty_side() -> None:
+    text = unified_diff("", "push rbp\nret")
+    assert "+push rbp" in text
+    assert "+ret" in text
+
+
+def test_diff_accepts_the_same_level_twice(tmp_path: Path) -> None:
+    src = tmp_path / "hello.c"
+    src.write_text("int add(int a, int b) { return a + b; }\n")
+
+    # comparing a level against itself is pointless but not an error
+    result = runner.invoke(app, ["diff", str(src), "--from", "2", "--to", "2"])
+    assert result.exit_code == 0
+    assert "-O2 against -O2" in result.stdout
+
+
+def test_diff_accepts_zero_context(tmp_path: Path) -> None:
+    src = tmp_path / "hello.c"
+    src.write_text("int add(int a, int b) { return a + b; }\n")
+
+    # zero means "changed lines only", which is different from a negative count
+    result = runner.invoke(app, ["diff", str(src), "--context", "0"])
+    assert result.exit_code == 0
+    assert "0 lines of context" in result.stdout
+
+
+def test_diff_short_flags_work_the_same(tmp_path: Path) -> None:
+    src = tmp_path / "hello.c"
+    src.write_text("int add(int a, int b) { return a + b; }\n")
+
+    result = runner.invoke(app, ["diff", str(src), "-C", "5", "-u"])
+    assert result.exit_code == 0
+    assert "5 lines of context" in result.stdout
+    assert "unified" in result.stdout
+
+
+def test_diff_without_unified_says_nothing_about_it(tmp_path: Path) -> None:
+    src = tmp_path / "hello.c"
+    src.write_text("int add(int a, int b) { return a + b; }\n")
+
+    result = runner.invoke(app, ["diff", str(src)])
+    # can't just search for "unified" — tmp_path is named after the test, so
+    # the word is already sitting in the path we printed
+    assert not result.stdout.strip().endswith("in unified format")
