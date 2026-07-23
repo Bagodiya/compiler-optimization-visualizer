@@ -2,7 +2,12 @@
 
 import pytest
 
-from compopt.asm import function_names, isolate_function, strip_directives
+from compopt.asm import (
+    find_function,
+    function_names,
+    isolate_function,
+    strip_directives,
+)
 
 # a small but realistic chunk of gcc output with the usual noise around it
 SAMPLE = """\t.file\t"add.c"
@@ -92,3 +97,17 @@ def test_isolate_unknown_function_raises() -> None:
 
 def test_isolate_returns_empty_when_no_functions() -> None:
     assert isolate_function("\tnop\n\tret") == ""
+
+
+def test_find_function_matches_isolate_when_the_function_is_there() -> None:
+    assert find_function(TWO_FUNCS, "sub") == isolate_function(TWO_FUNCS, "sub")
+
+
+def test_find_function_gives_empty_instead_of_raising() -> None:
+    # this is the whole reason it exists — a function that got inlined away
+    # at a higher -O level is a result, not a crash
+    assert find_function(TWO_FUNCS, "nope") == ""
+
+
+def test_find_function_still_defaults_to_the_first_one() -> None:
+    assert find_function(TWO_FUNCS).startswith("add:")

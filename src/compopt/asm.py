@@ -119,3 +119,18 @@ def isolate_function(asm: str, name: str | None = None) -> str:
     # stop at the next function, or run to the end if this is the last one
     end = next((i for i in starts if i > begin), len(lines))
     return "\n".join(lines[begin:end]).rstrip()
+
+
+def find_function(asm: str, name: str | None = None) -> str:
+    """Same as `isolate_function`, but a missing function is just "".
+
+    `show` wants the KeyError: if you ask for a function that isn't there,
+    that's a typo and it should say so. `diff` is the opposite — the function
+    disappearing at the higher level is the interesting result, not an error,
+    since that's what inlining looks like from the outside. So it gets this
+    version and decides for itself what to print.
+    """
+    try:
+        return isolate_function(asm, name)
+    except KeyError:
+        return ""

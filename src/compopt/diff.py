@@ -30,6 +30,11 @@ COLORS = {"add": "green", "remove": "red", "equal": "", "gap": "cyan"}
 # what we print instead of the asm when the two levels came out the same
 IDENTICAL_MESSAGE = "no difference: both levels produced the same assembly"
 
+# and what we print when the function isn't in one (or either) of the levels
+NEITHER_MESSAGE = "nothing to compare: the function is not in either level"
+GONE_MESSAGE = "the function is gone at -O{to} (inlined or optimized away)"
+NEW_MESSAGE = "the function only shows up at -O{to}, there is nothing at -O{frm}"
+
 
 def diff_lines(old: str, new: str) -> list[tuple[str, str]]:
     """Line-by-line diff between two blocks of assembly.
@@ -124,6 +129,30 @@ def is_identical(diff: list[tuple[str, str]]) -> bool:
     (an empty function, say), which isn't the same thing, so that's False.
     """
     return bool(diff) and all(tag == "equal" for tag, _ in diff)
+
+
+def missing_message(old: str, new: str, from_level: str = "0",
+                    to_level: str = "2") -> str | None:
+    """Explain an empty side, or None when there are two bodies to diff.
+
+    A function that got inlined at -O2 simply isn't in that assembly any
+    more, so `find_function` hands back "" for it. Diffing that against the
+    -O0 body technically works, but every single line comes out marked "-",
+    which reads like the optimizer deleted the code one instruction at a
+    time instead of telling you what actually happened. One line saying the
+    function is gone is a lot more useful.
+
+    The other two empty cases are here too: nothing at the low level but
+    something at the high one (rare, but static functions can go the other
+    way), and nothing at either, which usually just means a bad --func.
+    """
+    if not old.strip() and not new.strip():
+        return NEITHER_MESSAGE
+    if not new.strip():
+        return GONE_MESSAGE.format(to=to_level)
+    if not old.strip():
+        return NEW_MESSAGE.format(frm=from_level, to=to_level)
+    return None
 
 
 def render_diff(diff: list[tuple[str, str]]) -> str:

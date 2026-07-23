@@ -13,9 +13,11 @@ from typer.testing import CliRunner
 from compopt.cli import app
 from compopt.diff import (
     IDENTICAL_MESSAGE,
+    NEITHER_MESSAGE,
     diff_lines,
     highlight_diff,
     is_identical,
+    missing_message,
     render_diff,
     trim_context,
     unified_diff,
@@ -445,6 +447,41 @@ def test_diff_short_flags_work_the_same(tmp_path: Path) -> None:
     assert result.exit_code == 0
     assert "5 lines of context" in result.stdout
     assert "unified" in result.stdout
+
+
+def test_missing_message_none_when_both_sides_have_code() -> None:
+    # the normal case, so nothing to explain and we go on to the real diff
+    assert missing_message("push rbp\nret", "ret") is None
+
+
+def test_missing_message_when_the_function_vanished() -> None:
+    note = missing_message("push rbp\nret", "", from_level="0", to_level="2")
+    assert note is not None
+    assert "-O2" in note
+
+
+def test_missing_message_when_it_only_appears_later() -> None:
+    note = missing_message("", "push rbp\nret", from_level="0", to_level="3")
+    assert note is not None
+    assert "-O3" in note
+    assert "-O0" in note
+
+
+def test_missing_message_when_neither_level_has_it() -> None:
+    assert missing_message("", "") == NEITHER_MESSAGE
+
+
+def test_missing_message_treats_blank_lines_as_empty() -> None:
+    # isolate_function can hand back a body that is only whitespace, and that
+    # is still nothing worth diffing
+    assert missing_message("\n  \n", "\t\n") == NEITHER_MESSAGE
+
+
+def test_missing_message_beats_the_all_removed_diff() -> None:
+    old = "push rbp\nmov rbp, rsp\npop rbp\nret"
+    # without the note this would print four "-" lines and say nothing useful
+    assert all(tag == "remove" for tag, _ in diff_lines(old, ""))
+    assert missing_message(old, "") is not None
 
 
 def test_diff_without_unified_says_nothing_about_it(tmp_path: Path) -> None:
