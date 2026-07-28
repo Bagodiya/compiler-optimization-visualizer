@@ -1,14 +1,21 @@
-"""Tests for the Annotation type.
+"""Tests for the annotate command and the Annotation type.
 
 No detectors exist yet, so these build annotations by hand and check the
-range bookkeeping — the part every detector is going to depend on.
+range bookkeeping — the part every detector is going to depend on. The
+command is still a skeleton too, so those tests only check it validates the
+file it was handed.
 """
 
 import dataclasses
+from pathlib import Path
 
 import pytest
+from typer.testing import CliRunner
 
 from compopt.annotate import Annotation
+from compopt.cli import app
+
+runner = CliRunner()
 
 
 def test_fields_round_trip() -> None:
@@ -67,3 +74,32 @@ def test_annotation_is_frozen() -> None:
     note = Annotation("register coalescing", 2, 3)
     with pytest.raises(dataclasses.FrozenInstanceError):
         note.name = "something else"
+
+
+def test_annotate_names_the_file(tmp_path: Path) -> None:
+    src = tmp_path / "hello.c"
+    src.write_text("int add(int a, int b) { return a + b; }\n")
+
+    result = runner.invoke(app, ["annotate", str(src)])
+    assert result.exit_code == 0
+    # the placeholder should at least say which file it would work on
+    assert "hello.c" in result.stdout
+
+
+def test_annotate_missing_file(tmp_path: Path) -> None:
+    missing = tmp_path / "nope.c"
+
+    result = runner.invoke(app, ["annotate", str(missing)])
+    assert result.exit_code == 1
+
+
+def test_annotate_directory_is_rejected(tmp_path: Path) -> None:
+    # a directory isn't a source file, so this fails like a missing one
+    result = runner.invoke(app, ["annotate", str(tmp_path)])
+    assert result.exit_code == 1
+
+
+def test_annotate_shows_up_in_help() -> None:
+    result = runner.invoke(app, ["--help"])
+    assert result.exit_code == 0
+    assert "annotate" in result.stdout

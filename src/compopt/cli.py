@@ -6,6 +6,7 @@ from typing import Annotated
 import typer
 
 from compopt import __version__
+from compopt.annotate import run_annotate
 from compopt.compilers import CompileError
 from compopt.diff import run_diff
 from compopt.show import run_show
@@ -102,6 +103,14 @@ def diff(
 ) -> None:
     """Show what changed in the asm between two optimization levels."""
     run_diff(path, from_level, to_level, context, unified)
+
+
+@app.command()
+def annotate(
+    path: Annotated[Path, typer.Argument(help="C source file to inspect.")],
+) -> None:
+    """Name the optimizations the compiler applied to a source file."""
+    run_annotate(path)
 
 
 if __name__ == "__main__":
