@@ -1,9 +1,10 @@
-"""Tests for the annotate command and the Annotation type.
+"""Tests for the annotate command, the Annotation type, and the detectors.
 
-No detectors exist yet, so these build annotations by hand and check the
-range bookkeeping — the part every detector is going to depend on. The
-command is still a skeleton too, so those tests only check it validates the
-file it was handed.
+Some of these build annotations by hand and check the range bookkeeping — the
+part every detector depends on. The rest feed hand-written function bodies to
+the frame-pointer detector, one body per case, so it's obvious from the sample
+what's meant to be found. The command itself is still a skeleton, so those
+tests only check it validates the file it was handed.
 """
 
 import dataclasses
@@ -12,10 +13,60 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from compopt.annotate import Annotation
+from compopt.annotate import (
+    FRAME_ELIMINATION,
+    Annotation,
+    detect_frame_elimination,
+    has_frame_setup,
+)
 from compopt.cli import app
 
 runner = CliRunner()
+
+# what -O0 looks like: rbp is saved, aimed at the stack, and every local is
+# addressed off it. the .cfi line is in there on purpose — it sits between the
+# two prologue instructions in real gcc output.
+FRAMED = """add:
+.LFB0:
+\t.cfi_startproc
+\tpushq\t%rbp
+\t.cfi_def_cfa_offset 16
+\tmovq\t%rsp, %rbp
+\tmovl\t%edi, -4(%rbp)
+\tmovl\t%esi, -8(%rbp)
+\tmovl\t-4(%rbp), %eax
+\taddl\t-8(%rbp), %eax
+\tpopq\t%rbp
+\tret
+"""
+
+# the same function at -O2: no prologue at all, the arguments never touch memory
+FLAT = """add:
+\tleal\t(%rdi,%rsi), %eax
+\tret
+"""
+
+# clang with -masm=intel writes the prologue the other way round
+INTEL_FRAMED = """add:
+\tpush\trbp
+\tmov\trbp, rsp
+\tmov\tdword ptr [rbp - 4], edi
+\tpop\trbp
+\tret
+"""
+
+# rbp gets pushed here, but only because the function wants it as a spare
+# register across the call — there's no move aiming it at the stack, so this
+# is a callee-saved register and not a frame
+SAVES_RBP = """work:
+\tpushq\t%rbp
+\tpushq\t%rbx
+\tmovq\t%rdi, %rbx
+\tcall\thelper
+\tpopq\t%rbx
+\tpopq\t%rbp
+\tret
+"""
 
 
 def test_fields_round_trip() -> None:
@@ -74,6 +125,66 @@ def test_annotation_is_frozen() -> None:
     note = Annotation("register coalescing", 2, 3)
     with pytest.raises(dataclasses.FrozenInstanceError):
         note.name = "something else"
+
+
+def test_frame_setup_found_in_att_prologue() -> None:
+    assert has_frame_setup(FRAMED)
+
+
+def test_frame_setup_found_in_intel_prologue() -> None:
+    assert has_frame_setup(INTEL_FRAMED)
+
+
+def test_no_frame_setup_without_a_prologue() -> None:
+    assert not has_frame_setup(FLAT)
+
+
+def test_pushing_rbp_alone_is_not_a_frame() -> None:
+    assert not has_frame_setup(SAVES_RBP)
+
+
+def test_framed_function_gets_no_annotation() -> None:
+    assert detect_frame_elimination(FRAMED) is None
+    assert detect_frame_elimination(INTEL_FRAMED) is None
+
+
+def test_flat_function_is_annotated() -> None:
+    note = detect_frame_elimination(FLAT)
+    assert note is not None
+    assert note.name == FRAME_ELIMINATION
+    assert note.description
+
+
+def test_annotation_points_at_the_first_instruction() -> None:
+    # line 1 is the "add:" label, so the lea on line 2 is where the prologue
+    # would have been
+    note = detect_frame_elimination(FLAT)
+    assert note is not None
+    assert (note.start, note.end) == (2, 2)
+
+
+def test_annotation_skips_labels_and_directives() -> None:
+    # same body as FLAT with a pile of noise on top; the annotation should
+    # still land on the instruction, not on the first line of the block
+    padded = "add:\n.LFB0:\n\t.cfi_startproc\n\tleal\t(%rdi,%rsi), %eax\n\tret\n"
+    note = detect_frame_elimination(padded)
+    assert note is not None
+    assert note.start == 4
+
+
+def test_callee_saved_rbp_still_counts_as_eliminated() -> None:
+    note = detect_frame_elimination(SAVES_RBP)
+    assert note is not None
+    assert note.start == 2
+
+
+def test_empty_body_gives_nothing() -> None:
+    assert detect_frame_elimination("") is None
+
+
+def test_body_with_no_instructions_gives_nothing() -> None:
+    # a label and a directive on their own aren't a function that lost a frame
+    assert detect_frame_elimination("add:\n\t.cfi_startproc\n") is None
 
 
 def test_annotate_names_the_file(tmp_path: Path) -> None:
