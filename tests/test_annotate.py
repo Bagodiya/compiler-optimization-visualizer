@@ -2,9 +2,9 @@
 
 Some of these build annotations by hand and check the range bookkeeping — the
 part every detector depends on. The rest feed hand-written function bodies to
-the frame-pointer detector, one body per case, so it's obvious from the sample
-what's meant to be found. The command itself is still a skeleton, so those
-tests only check it validates the file it was handed.
+the detectors, one body per case, so it's obvious from the sample what's meant
+to be found. The command itself is still a skeleton, so those tests only check
+it validates the file it was handed.
 """
 
 import dataclasses
@@ -14,8 +14,10 @@ import pytest
 from typer.testing import CliRunner
 
 from compopt.annotate import (
+    CONSTANT_FOLDING,
     FRAME_ELIMINATION,
     Annotation,
+    detect_constant_folding,
     detect_frame_elimination,
     has_frame_setup,
 )
@@ -65,6 +67,62 @@ SAVES_RBP = """work:
 \tcall\thelper
 \tpopq\t%rbx
 \tpopq\t%rbp
+\tret
+"""
+
+# examples/const_fold.c at -O0: 7*6 is folded on its own, but the rest of the
+# arithmetic is still there, each step going out to a local and back
+UNFOLDED = """compute:
+\tpushq\t%rbp
+\tmovq\t%rsp, %rbp
+\tmovl\t$42, -4(%rbp)
+\tmovl\t-4(%rbp), %eax
+\taddl\t$100, %eax
+\tmovl\t%eax, -8(%rbp)
+\tmovl\t-8(%rbp), %eax
+\tsubl\t$42, %eax
+\tshll\t$1, %eax
+\tpopq\t%rbp
+\tret
+"""
+
+# the same function at -O2, with the whole sum collapsed into one number
+FOLDED = """compute:
+\tpushq\t%rbp
+\tmovq\t%rsp, %rbp
+\tmovl\t$200, %eax
+\tpopq\t%rbp
+\tret
+"""
+
+INTEL_FOLDED = """compute:
+\tmov\teax, 200
+\tret
+"""
+
+# `return 0` — the xor is shorter to encode than moving a zero in, so that's
+# what both compilers emit
+ZERO_RETURN = """main:
+\txorl\t%eax, %eax
+\tret
+"""
+
+# the return value comes from the caller, so there was nothing to fold
+IDENTITY = """identity:
+\tmovl\t%edi, %eax
+\tret
+"""
+
+# a literal, but it goes to a global instead of the return register
+STORES_LITERAL = """set_flag:
+\tmovl\t$1, flag(%rip)
+\tret
+"""
+
+# folded as far as it goes, then multiplied by an argument at run time
+HALF_FOLDED = """scale:
+\tmovl\t$200, %eax
+\timull\t%edi, %eax
 \tret
 """
 
@@ -185,6 +243,50 @@ def test_empty_body_gives_nothing() -> None:
 def test_body_with_no_instructions_gives_nothing() -> None:
     # a label and a directive on their own aren't a function that lost a frame
     assert detect_frame_elimination("add:\n\t.cfi_startproc\n") is None
+
+
+def test_folded_function_is_annotated() -> None:
+    note = detect_constant_folding(FOLDED)
+    assert note is not None
+    assert note.name == CONSTANT_FOLDING
+    assert note.description
+
+
+def test_folding_points_at_the_literal() -> None:
+    # line 4 is the `movl $200, %eax` that replaced the whole calculation
+    note = detect_constant_folding(FOLDED)
+    assert note is not None
+    assert (note.start, note.end) == (4, 4)
+
+
+def test_folding_found_in_intel_syntax() -> None:
+    note = detect_constant_folding(INTEL_FOLDED)
+    assert note is not None
+    assert note.start == 2
+
+
+def test_zeroing_the_return_register_counts() -> None:
+    note = detect_constant_folding(ZERO_RETURN)
+    assert note is not None
+    assert note.start == 2
+
+
+def test_remaining_arithmetic_means_no_folding() -> None:
+    assert detect_constant_folding(UNFOLDED) is None
+    assert detect_constant_folding(HALF_FOLDED) is None
+
+
+def test_returning_an_argument_is_not_folding() -> None:
+    assert detect_constant_folding(IDENTITY) is None
+
+
+def test_literal_stored_elsewhere_is_not_folding() -> None:
+    assert detect_constant_folding(STORES_LITERAL) is None
+
+
+def test_empty_body_has_nothing_to_fold() -> None:
+    assert detect_constant_folding("") is None
+    assert detect_constant_folding("compute:\n\t.cfi_startproc\n") is None
 
 
 def test_annotate_names_the_file(tmp_path: Path) -> None:
