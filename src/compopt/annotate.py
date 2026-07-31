@@ -30,6 +30,16 @@ MOVE_MNEMONICS = ("mov", "movq", "movl")
 BASE_POINTERS = ("rbp", "ebp")
 STACK_POINTERS = ("rsp", "esp")
 
+# a local that didn't get a register lives at some offset from one of those
+# two, and both syntaxes wrap the address in brackets of their own:
+#
+#     AT&T     -4(%rbp)          movl -4(%rbp), %eax
+#     Intel    [rbp - 4]         mov  eax, dword ptr [rbp - 4]
+#
+# so a stack slot is a bracket of either kind with a frame register inside it.
+FRAME_REGISTERS = BASE_POINTERS + STACK_POINTERS
+MEMORY_BRACKETS = ("(", "[")
+
 # whichever width the function returns, the value comes back in some slice of
 # the same register, so a byte-sized return lands in al and an int in eax.
 RETURN_REGISTERS = ("rax", "eax", "ax", "al")
@@ -76,6 +86,13 @@ CONSTANT_FOLDING = "constant folding"
 CONSTANT_FOLDING_DESCRIPTION = (
     "the arithmetic was done by the compiler instead of by the program, so the "
     "function hands back a finished number and never computes anything"
+)
+
+REGISTER_COALESCING = "register coalescing"
+REGISTER_COALESCING_DESCRIPTION = (
+    "the locals were given registers to live in rather than a stack slot each, "
+    "so the function works on its values in place instead of writing them out "
+    "to memory and loading them back for every step"
 )
 
 
@@ -200,16 +217,32 @@ def has_frame_setup(asm: str) -> bool:
     return False
 
 
-def _first_instruction_line(asm: str) -> int | None:
-    """Which line the function's first real instruction sits on, or None.
+def _instruction_line_range(asm: str) -> tuple[int, int] | None:
+    """The first and last lines holding an instruction, or None for neither.
 
-    Counted from 1 over the lines it was handed, so the number matches the
-    gutter `render.line_number_gutter` draws for the same body.
+    Counted from 1 over the lines it was handed, so the numbers match the
+    gutter `render.line_number_gutter` draws for the same body. The ends are
+    both instructions, which means the label on top and any trailing .size
+    directive stay outside the range — an annotation covering those would be
+    pointing at lines that aren't code.
     """
+    first = None
+    last = None
     for number, line in enumerate(asm.splitlines(), start=1):
-        if _parse_instruction(line) is not None:
-            return number
-    return None
+        if _parse_instruction(line) is None:
+            continue
+        if first is None:
+            first = number
+        last = number
+    if first is None or last is None:
+        return None
+    return first, last
+
+
+def _first_instruction_line(asm: str) -> int | None:
+    """Which line the function's first real instruction sits on, or None."""
+    span = _instruction_line_range(asm)
+    return None if span is None else span[0]
 
 
 def detect_frame_elimination(asm: str) -> Annotation | None:
@@ -342,6 +375,72 @@ def detect_constant_folding(asm: str) -> Annotation | None:
         return None
 
     return Annotation(CONSTANT_FOLDING, line, line, CONSTANT_FOLDING_DESCRIPTION)
+
+
+def _is_stack_slot(operand: str) -> bool:
+    """True when the operand is memory addressed off rbp or rsp.
+
+    A frame register on its own isn't enough — `pushq %rbp` names rbp and
+    doesn't touch a local. It has to be inside brackets for the operand to be
+    an address rather than the register's own value.
+
+    Globals go through the same brackets but off a different register, so
+    `flag(%rip)` and `[rip + flag]` don't match here, which is what we want:
+    a global was always going to be in memory and no allocator was ever going
+    to keep it somewhere else.
+    """
+    if not any(bracket in operand for bracket in MEMORY_BRACKETS):
+        return False
+    # the '%' is still in there on the AT&T side, since the parser only takes
+    # the leading one off, but a plain substring test doesn't care either way
+    return any(register in operand for register in FRAME_REGISTERS)
+
+
+def uses_stack_slots(asm: str) -> bool:
+    """True when anything in the body reads or writes a local in memory."""
+    for line in asm.splitlines():
+        parsed = _parse_instruction(line)
+        if parsed is None:
+            continue
+        _, operands = parsed
+        if any(_is_stack_slot(operand) for operand in operands):
+            return True
+    return False
+
+
+def detect_register_coalescing(asm: str) -> Annotation | None:
+    """Spot a function whose locals never went out to the stack.
+
+    At -O0 every variable gets its own slot in the frame and every use of it
+    is a load and a store, so `a + b` reads both arguments back out of memory
+    after they were just written there. With the optimizer on, the allocator
+    hands the variables registers, and the ones that only pass a value along
+    end up sharing a register instead of each having their own — that's the
+    coalescing part. What you see in the asm is a body doing all of its work
+    between registers with the frame slots gone.
+
+    So the tell is the absence of any operand addressed off rbp or rsp. That
+    also means a function which never had anything to spill — two arguments
+    added and returned, say — reports as coalesced, because its asm looks
+    exactly like a function whose spills were optimized away. Same trade as
+    `detect_constant_folding` makes: one body can't tell you what the -O0
+    build looked like.
+
+    The annotation covers the whole body rather than a single line, since it's
+    the shape of all the instructions together that shows it, not any one of
+    them. None comes back for a body with nothing in it to keep in registers.
+
+    Takes the asm for a single function, same as the other detectors.
+    """
+    if uses_stack_slots(asm):
+        return None
+
+    span = _instruction_line_range(asm)
+    if span is None:
+        return None
+
+    start, end = span
+    return Annotation(REGISTER_COALESCING, start, end, REGISTER_COALESCING_DESCRIPTION)
 
 
 def run_annotate(path: Path) -> None:

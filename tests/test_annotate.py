@@ -16,10 +16,13 @@ from typer.testing import CliRunner
 from compopt.annotate import (
     CONSTANT_FOLDING,
     FRAME_ELIMINATION,
+    REGISTER_COALESCING,
     Annotation,
     detect_constant_folding,
     detect_frame_elimination,
+    detect_register_coalescing,
     has_frame_setup,
+    uses_stack_slots,
 )
 from compopt.cli import app
 
@@ -123,6 +126,42 @@ STORES_LITERAL = """set_flag:
 HALF_FOLDED = """scale:
 \tmovl\t$200, %eax
 \timull\t%edi, %eax
+\tret
+"""
+
+# the frame pointer is gone but the locals are still in memory, addressed off
+# rsp now instead of rbp — this is the case that frame elimination alone would
+# get wrong if we treated the missing prologue as proof the values are in
+# registers
+SPILLS_TO_RSP = """work:
+\tsubq\t$24, %rsp
+\tmovl\t%edi, 12(%rsp)
+\tcall\thelper
+\taddl\t12(%rsp), %eax
+\taddq\t$24, %rsp
+\tret
+"""
+
+# everything happens between registers, and rbp is only pushed because the
+# function borrows it as a spare — no offset off it anywhere
+KEEPS_IN_REGISTERS = """work:
+\tpushq\t%rbp
+\tmovl\t%edi, %ebp
+\tcall\thelper
+\taddl\t%ebp, %eax
+\tpopq\t%rbp
+\tret
+"""
+
+# a global, which lives in memory no matter what the allocator does, so it
+# shouldn't read as a spilled local
+READS_GLOBAL = """get_flag:
+\tmovl\tflag(%rip), %eax
+\tret
+"""
+
+INTEL_READS_GLOBAL = """get_flag:
+\tmov\teax, dword ptr [rip + flag]
 \tret
 """
 
@@ -287,6 +326,72 @@ def test_literal_stored_elsewhere_is_not_folding() -> None:
 def test_empty_body_has_nothing_to_fold() -> None:
     assert detect_constant_folding("") is None
     assert detect_constant_folding("compute:\n\t.cfi_startproc\n") is None
+
+
+def test_stack_slots_found_off_rbp() -> None:
+    assert uses_stack_slots(FRAMED)
+
+
+def test_stack_slots_found_off_rsp() -> None:
+    assert uses_stack_slots(SPILLS_TO_RSP)
+
+
+def test_stack_slots_found_in_intel_syntax() -> None:
+    assert uses_stack_slots(INTEL_FRAMED)
+
+
+def test_no_stack_slots_when_everything_is_in_registers() -> None:
+    assert not uses_stack_slots(FLAT)
+    assert not uses_stack_slots(KEEPS_IN_REGISTERS)
+
+
+def test_pushing_rbp_is_not_a_stack_slot() -> None:
+    # the register is named, but nothing is addressed off it
+    assert not uses_stack_slots(SAVES_RBP)
+
+
+def test_globals_are_not_stack_slots() -> None:
+    assert not uses_stack_slots(READS_GLOBAL)
+    assert not uses_stack_slots(INTEL_READS_GLOBAL)
+    assert not uses_stack_slots(STORES_LITERAL)
+
+
+def test_register_only_body_is_annotated() -> None:
+    note = detect_register_coalescing(KEEPS_IN_REGISTERS)
+    assert note is not None
+    assert note.name == REGISTER_COALESCING
+    assert note.description
+
+
+def test_coalescing_covers_the_whole_body() -> None:
+    # line 1 is the label, so the range runs from the push on line 2 to the
+    # ret on line 7
+    note = detect_register_coalescing(KEEPS_IN_REGISTERS)
+    assert note is not None
+    assert (note.start, note.end) == (2, 7)
+
+
+def test_spilled_locals_are_not_annotated() -> None:
+    assert detect_register_coalescing(FRAMED) is None
+    assert detect_register_coalescing(INTEL_FRAMED) is None
+
+
+def test_missing_prologue_alone_is_not_enough() -> None:
+    # the frame pointer is gone, so frame elimination fires here, but the
+    # locals are still going out to memory
+    assert detect_frame_elimination(SPILLS_TO_RSP) is not None
+    assert detect_register_coalescing(SPILLS_TO_RSP) is None
+
+
+def test_coalescing_found_in_intel_syntax() -> None:
+    note = detect_register_coalescing(INTEL_FOLDED)
+    assert note is not None
+    assert (note.start, note.end) == (2, 3)
+
+
+def test_empty_body_has_nothing_in_registers() -> None:
+    assert detect_register_coalescing("") is None
+    assert detect_register_coalescing("work:\n\t.cfi_startproc\n") is None
 
 
 def test_annotate_names_the_file(tmp_path: Path) -> None:
