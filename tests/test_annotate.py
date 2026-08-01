@@ -15,13 +15,16 @@ from typer.testing import CliRunner
 
 from compopt.annotate import (
     CONSTANT_FOLDING,
+    DEAD_CODE_ELIMINATION,
     FRAME_ELIMINATION,
     REGISTER_COALESCING,
     Annotation,
     detect_constant_folding,
+    detect_dead_code_elimination,
     detect_frame_elimination,
     detect_register_coalescing,
     has_frame_setup,
+    instruction_count,
     uses_stack_slots,
 )
 from compopt.cli import app
@@ -162,6 +165,57 @@ READS_GLOBAL = """get_flag:
 
 INTEL_READS_GLOBAL = """get_flag:
 \tmov\teax, dword ptr [rip + flag]
+\tret
+"""
+
+# `int t = x * 3; return x + 1;` at -O0 — t is worked out and stored even
+# though nothing ever reads it back
+DEAD_STORE = """compute:
+\tpushq\t%rbp
+\tmovq\t%rsp, %rbp
+\tmovl\t%edi, -4(%rbp)
+\tmovl\t-4(%rbp), %eax
+\timull\t$3, %eax, %eax
+\tmovl\t%eax, -8(%rbp)
+\tmovl\t-4(%rbp), %eax
+\taddl\t$1, %eax
+\tpopq\t%rbp
+\tret
+"""
+
+# the same function at -O2, with the multiply gone entirely
+DEAD_STORE_GONE = """compute:
+\tleal\t1(%rdi), %eax
+\tret
+"""
+
+# FRAMED with the prologue taken out and nothing else changed: the locals are
+# still written to memory and read back, so all the work is still being done
+FRAMELESS = """add:
+\tmovl\t%edi, -4(%rsp)
+\tmovl\t%esi, -8(%rsp)
+\tmovl\t-4(%rsp), %eax
+\taddl\t-8(%rsp), %eax
+\tret
+"""
+
+# a loop that adds the same value n times
+LOOPED = """sum:
+\txorl\t%eax, %eax
+.L2:
+\taddl\t%edi, %eax
+\tsubl\t$1, %esi
+\tjne\t.L2
+\tret
+"""
+
+# and the unrolled version of it, which is longer than what it replaced
+UNROLLED = """sum:
+\txorl\t%eax, %eax
+\taddl\t%edi, %eax
+\taddl\t%edi, %eax
+\taddl\t%edi, %eax
+\taddl\t%edi, %eax
 \tret
 """
 
@@ -392,6 +446,60 @@ def test_coalescing_found_in_intel_syntax() -> None:
 def test_empty_body_has_nothing_in_registers() -> None:
     assert detect_register_coalescing("") is None
     assert detect_register_coalescing("work:\n\t.cfi_startproc\n") is None
+
+
+def test_instruction_count_ignores_everything_but_code() -> None:
+    # FRAMED is twelve lines, two of them labels and two of them .cfi
+    # directives, which leaves eight instructions
+    assert instruction_count(FRAMED) == 8
+    assert instruction_count(FLAT) == 2
+
+
+def test_instruction_count_of_an_empty_body() -> None:
+    assert instruction_count("") == 0
+    assert instruction_count("add:\n\t.cfi_startproc\n") == 0
+
+
+def test_dropped_work_is_annotated() -> None:
+    note = detect_dead_code_elimination(DEAD_STORE, DEAD_STORE_GONE)
+    assert note is not None
+    assert note.name == DEAD_CODE_ELIMINATION
+    assert note.description
+
+
+def test_dead_code_covers_the_optimized_body() -> None:
+    # the range is over the shorter body: line 1 is the label, so the lea on
+    # line 2 through the ret on line 3
+    note = detect_dead_code_elimination(DEAD_STORE, DEAD_STORE_GONE)
+    assert note is not None
+    assert (note.start, note.end) == (2, 3)
+
+
+def test_same_body_twice_is_not_dead_code() -> None:
+    assert detect_dead_code_elimination(FRAMED, FRAMED) is None
+
+
+def test_losing_only_the_prologue_is_not_dead_code() -> None:
+    # three instructions fewer, and all three of them are the frame that
+    # detect_frame_elimination already reports
+    assert instruction_count(FRAMED) - instruction_count(FRAMELESS) == 3
+    assert detect_dead_code_elimination(FRAMED, FRAMELESS) is None
+
+
+def test_a_longer_body_is_not_dead_code() -> None:
+    # unrolling trades instructions for branches, so the optimized side grows
+    assert detect_dead_code_elimination(LOOPED, UNROLLED) is None
+
+
+def test_a_missing_side_gives_nothing() -> None:
+    assert detect_dead_code_elimination("", FLAT) is None
+    assert detect_dead_code_elimination(FRAMED, "") is None
+    assert detect_dead_code_elimination("", "") is None
+
+
+def test_a_body_with_no_instructions_gives_nothing() -> None:
+    # not empty, but there's no code in it to have been left out
+    assert detect_dead_code_elimination(FRAMED, "add:\n\t.cfi_startproc\n") is None
 
 
 def test_annotate_names_the_file(tmp_path: Path) -> None:
