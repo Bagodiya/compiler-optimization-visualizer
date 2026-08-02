@@ -17,13 +17,16 @@ from compopt.annotate import (
     CONSTANT_FOLDING,
     DEAD_CODE_ELIMINATION,
     FRAME_ELIMINATION,
+    LOOP_UNROLLING,
     REGISTER_COALESCING,
     Annotation,
     detect_constant_folding,
     detect_dead_code_elimination,
     detect_frame_elimination,
+    detect_loop_unrolling,
     detect_register_coalescing,
     has_frame_setup,
+    has_loop_branch,
     instruction_count,
     uses_stack_slots,
 )
@@ -216,6 +219,75 @@ UNROLLED = """sum:
 \taddl\t%edi, %eax
 \taddl\t%edi, %eax
 \taddl\t%edi, %eax
+\tret
+"""
+
+# adding up four elements of an array, unrolled: the copies do the same thing
+# but each one reaches a different offset, which is the realistic shape
+UNROLLED_OFFSETS = """total:
+\tmovl\t(%rdi), %eax
+\taddl\t4(%rdi), %eax
+\taddl\t8(%rdi), %eax
+\taddl\t12(%rdi), %eax
+\tret
+"""
+
+# the same loop the other way out: the compiler worked out the closed form, so
+# the branch is gone but there's no copy of the body anywhere
+CLOSED_FORM = """sum:
+\tmovl\t%esi, %eax
+\timull\t%edi, %eax
+\tret
+"""
+
+# unrolled four at a time and still going round — the counter and the jump are
+# both still there
+PARTLY_UNROLLED = """sum:
+\txorl\t%eax, %eax
+.L2:
+\taddl\t(%rdi), %eax
+\taddl\t4(%rdi), %eax
+\taddl\t8(%rdi), %eax
+\taddl\t12(%rdi), %eax
+\taddq\t$16, %rdi
+\tcmpq\t%rdx, %rdi
+\tjne\t.L2
+\tret
+"""
+
+# the branch is gone and two moves sit next to each other, which is not a copy
+# of anything — plenty of ordinary code looks like this
+TWO_MOVES = """sum:
+\tmovl\t%edi, %eax
+\tmovl\t%esi, %edx
+\tret
+"""
+
+# an if/else: the jump goes forwards, over the arm that wasn't taken
+BRANCHY = """max:
+\tcmpl\t%esi, %edi
+\tjle\t.L2
+\tmovl\t%edi, %eax
+\tret
+.L2:
+\tmovl\t%esi, %eax
+\tret
+"""
+
+INTEL_LOOPED = """sum:
+\txor\teax, eax
+.L2:
+\tadd\teax, edi
+\tsub\tesi, 1
+\tjne\t.L2
+\tret
+"""
+
+INTEL_UNROLLED = """sum:
+\txor\teax, eax
+\tadd\teax, edi
+\tadd\teax, edi
+\tadd\teax, edi
 \tret
 """
 
@@ -500,6 +572,77 @@ def test_a_missing_side_gives_nothing() -> None:
 def test_a_body_with_no_instructions_gives_nothing() -> None:
     # not empty, but there's no code in it to have been left out
     assert detect_dead_code_elimination(FRAMED, "add:\n\t.cfi_startproc\n") is None
+
+
+def test_a_jump_back_up_is_a_loop() -> None:
+    assert has_loop_branch(LOOPED)
+    assert has_loop_branch(INTEL_LOOPED)
+
+
+def test_a_jump_forward_is_not_a_loop() -> None:
+    assert not has_loop_branch(BRANCHY)
+
+
+def test_a_body_without_jumps_is_not_a_loop() -> None:
+    assert not has_loop_branch(UNROLLED)
+    assert not has_loop_branch(FLAT)
+
+
+def test_unrolled_loop_is_annotated() -> None:
+    note = detect_loop_unrolling(LOOPED, UNROLLED)
+    assert note is not None
+    assert note.name == LOOP_UNROLLING
+    assert note.description
+
+
+def test_unrolling_covers_the_copies_and_nothing_else() -> None:
+    # the xor on line 2 sets the total up and isn't part of the body, so the
+    # range is the four adds on lines 3 to 6
+    note = detect_loop_unrolling(LOOPED, UNROLLED)
+    assert note is not None
+    assert (note.start, note.end) == (3, 6)
+
+
+def test_copies_are_found_when_the_operands_differ() -> None:
+    # each add reaches a different offset, so only the mnemonics line up
+    note = detect_loop_unrolling(LOOPED, UNROLLED_OFFSETS)
+    assert note is not None
+    assert (note.start, note.end) == (3, 5)
+
+
+def test_unrolling_found_in_intel_syntax() -> None:
+    note = detect_loop_unrolling(INTEL_LOOPED, INTEL_UNROLLED)
+    assert note is not None
+    assert (note.start, note.end) == (3, 5)
+
+
+def test_a_loop_that_is_still_a_loop_is_not_unrolled() -> None:
+    assert detect_loop_unrolling(LOOPED, PARTLY_UNROLLED) is None
+    assert detect_loop_unrolling(LOOPED, LOOPED) is None
+
+
+def test_a_closed_form_is_not_unrolling() -> None:
+    # no branch left either, but nothing was copied — the loop was worked out
+    assert detect_loop_unrolling(LOOPED, CLOSED_FORM) is None
+
+
+def test_two_matching_instructions_are_not_a_copy() -> None:
+    assert detect_loop_unrolling(LOOPED, TWO_MOVES) is None
+
+
+def test_nothing_to_unroll_without_a_loop_first() -> None:
+    # UNROLLED on its own could just as well have been written that way
+    assert detect_loop_unrolling(FRAMED, UNROLLED) is None
+
+
+def test_a_missing_side_has_no_loop_to_unroll() -> None:
+    assert detect_loop_unrolling("", UNROLLED) is None
+    assert detect_loop_unrolling(LOOPED, "") is None
+    assert detect_loop_unrolling("", "") is None
+
+
+def test_a_body_with_no_instructions_is_not_unrolled() -> None:
+    assert detect_loop_unrolling(LOOPED, "sum:\n\t.cfi_startproc\n") is None
 
 
 def test_annotate_names_the_file(tmp_path: Path) -> None:
