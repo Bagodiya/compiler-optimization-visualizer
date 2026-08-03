@@ -19,15 +19,18 @@ from compopt.annotate import (
     FRAME_ELIMINATION,
     LOOP_UNROLLING,
     REGISTER_COALESCING,
+    TAIL_CALL,
     Annotation,
     detect_constant_folding,
     detect_dead_code_elimination,
     detect_frame_elimination,
     detect_loop_unrolling,
     detect_register_coalescing,
+    detect_tail_call,
     has_frame_setup,
     has_loop_branch,
     instruction_count,
+    tail_jump_line,
     uses_stack_slots,
 )
 from compopt.cli import app
@@ -288,6 +291,75 @@ INTEL_UNROLLED = """sum:
 \tadd\teax, edi
 \tadd\teax, edi
 \tadd\teax, edi
+\tret
+"""
+
+# `return helper(x + 1);` at -O0: helper is called, control comes back here,
+# and the ret passes its answer on to whoever called us
+TAIL_CALLER = """wrapper:
+\tpushq\t%rbp
+\tmovq\t%rsp, %rbp
+\taddl\t$1, %edi
+\tcall\thelper
+\tpopq\t%rbp
+\tret
+"""
+
+# the same function at -O2 — no call and no ret, so helper returns to our
+# caller instead of to us
+TAIL_JUMPED = """wrapper:
+\taddl\t$1, %edi
+\tjmp\thelper
+"""
+
+# a function in a shared library goes through the PLT, so the target picks up
+# a suffix and stops being a bare name
+TAIL_JUMPED_PLT = """wrapper:
+\taddl\t$1, %edi
+\tjmp\tputs@PLT
+"""
+
+# what gcc really leaves underneath the jump. the bookkeeping isn't code, so
+# the jump is still the last thing the function does
+TAIL_JUMPED_WITH_DIRECTIVES = """wrapper:
+\t.cfi_startproc
+\taddl\t$1, %edi
+\tjmp\thelper
+\t.cfi_endproc
+\t.size\twrapper, .-wrapper
+"""
+
+INTEL_TAIL_JUMPED = """wrapper:
+\tadd\tedi, 1
+\tjmp\thelper
+"""
+
+# `while (1) poll();` — the jump is unconditional and it is the last
+# instruction, but .L2 is right here in the body so control never leaves
+SPINS = """spin:
+.L2:
+\tcall\tpoll
+\tjmp\t.L2
+"""
+
+# a switch compiled to a jump table: the address is worked out at run time and
+# lands back inside this same function
+JUMP_TABLE = """pick:
+\tmovq\t.L4(,%rdi,8), %rax
+\tjmp\t*%rax
+"""
+
+INTEL_JUMP_TABLE = """pick:
+\tmov\trax, qword ptr [rip + .L4]
+\tjmp\trax
+"""
+
+# `if (x) return helper();` — the jump out is conditional, and the path that
+# doesn't take it is still ours, so the ret is what ends the function
+CONDITIONAL_TAIL = """check:
+\ttestl\t%edi, %edi
+\tjne\thelper
+\txorl\t%eax, %eax
 \tret
 """
 
@@ -643,6 +715,59 @@ def test_a_missing_side_has_no_loop_to_unroll() -> None:
 
 def test_a_body_with_no_instructions_is_not_unrolled() -> None:
     assert detect_loop_unrolling(LOOPED, "sum:\n\t.cfi_startproc\n") is None
+
+
+def test_a_jump_out_at_the_end_is_a_tail_call() -> None:
+    note = detect_tail_call(TAIL_JUMPED)
+    assert note is not None
+    assert note.name == TAIL_CALL
+    assert note.description
+
+
+def test_tail_call_points_at_the_jump() -> None:
+    note = detect_tail_call(TAIL_JUMPED)
+    assert note is not None
+    assert (note.start, note.end) == (3, 3)
+
+
+def test_a_plt_target_is_still_a_tail_call() -> None:
+    assert tail_jump_line(TAIL_JUMPED_PLT) == 3
+
+
+def test_trailing_directives_do_not_hide_the_jump() -> None:
+    assert tail_jump_line(TAIL_JUMPED_WITH_DIRECTIVES) == 4
+
+
+def test_tail_call_found_in_intel_syntax() -> None:
+    assert tail_jump_line(INTEL_TAIL_JUMPED) == 3
+
+
+def test_calling_and_returning_is_not_a_tail_call() -> None:
+    assert detect_tail_call(TAIL_CALLER) is None
+
+
+def test_a_jump_back_into_the_body_is_not_a_tail_call() -> None:
+    assert detect_tail_call(SPINS) is None
+    assert detect_tail_call(LOOPED) is None
+
+
+def test_an_indirect_jump_is_not_a_tail_call() -> None:
+    assert detect_tail_call(JUMP_TABLE) is None
+    assert detect_tail_call(INTEL_JUMP_TABLE) is None
+
+
+def test_a_conditional_jump_out_is_not_a_tail_call() -> None:
+    assert detect_tail_call(CONDITIONAL_TAIL) is None
+
+
+def test_a_body_that_just_returns_has_no_tail_call() -> None:
+    assert detect_tail_call(FLAT) is None
+    assert detect_tail_call(FRAMED) is None
+
+
+def test_a_body_with_no_instructions_has_no_tail_call() -> None:
+    assert detect_tail_call("") is None
+    assert detect_tail_call("wrapper:\n\t.cfi_startproc\n") is None
 
 
 def test_annotate_names_the_file(tmp_path: Path) -> None:

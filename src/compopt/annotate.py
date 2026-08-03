@@ -55,6 +55,37 @@ LOAD_MNEMONICS = ("mov", "movb", "movw", "movl", "movq")
 JUMP_PREFIX = "j"
 COUNTING_JUMPS = ("loop", "loope", "loopz", "loopne", "loopnz")
 
+# the two spellings of the jump that always goes. everything else beginning
+# with a j is asking a question first, and a jump that might not happen leaves
+# the function still running underneath it.
+UNCONDITIONAL_JUMPS = ("jmp", "jmpq")
+
+# a jump can also go through a register instead of naming anything, which is
+# what a switch big enough to get a jump table compiles to. AT&T marks that
+# with a '*' and Intel just writes the register bare, so the sigil doesn't
+# catch both and the names have to be listed. Only the 64-bit ones: what a
+# jump wants is an address, and an address here is 64 bits wide.
+ADDRESS_REGISTERS = frozenset(
+    {
+        "rax",
+        "rbx",
+        "rcx",
+        "rdx",
+        "rsi",
+        "rdi",
+        "rbp",
+        "rsp",
+        "r8",
+        "r9",
+        "r10",
+        "r11",
+        "r12",
+        "r13",
+        "r14",
+        "r15",
+    }
+)
+
 # instructions that mean the machine is still working something out at run
 # time. only the stems are listed: the sized spellings (addl, subq, imull...)
 # come off the same stem, and there are far too many combinations to write out
@@ -114,6 +145,13 @@ LOOP_UNROLLING_DESCRIPTION = (
     "the body of the loop was written out several times over instead of being "
     "jumped back to, so the work runs in a straight line with no counter to "
     "keep and no branch to take on every trip"
+)
+
+TAIL_CALL = "tail call optimization"
+TAIL_CALL_DESCRIPTION = (
+    "the last thing the function does is hand over to another one, and it "
+    "jumps there rather than calling it and waiting, so nothing comes back "
+    "here — the callee borrows this frame and returns straight to our caller"
 )
 
 # push the base pointer, aim it at the stack, pop it back off at the end. that
@@ -688,6 +726,111 @@ def detect_loop_unrolling(baseline: str, optimized: str) -> Annotation | None:
     start = instructions[first][0]
     end = instructions[last][0]
     return Annotation(LOOP_UNROLLING, start, end, LOOP_UNROLLING_DESCRIPTION)
+
+
+def _local_labels(asm: str) -> set[str]:
+    """Every label the body defines, lowercased.
+
+    `has_loop_branch` collects these as it walks, because it cares about which
+    ones it has already gone past. Here the direction doesn't matter — a jump
+    naming any of them is staying inside this function, and a jump naming
+    something else is leaving it, which is the whole question below.
+    """
+    labels: set[str] = set()
+    for line in asm.splitlines():
+        label = _label_name(line)
+        if label is not None:
+            labels.add(label)
+    return labels
+
+
+def _is_indirect(operand: str) -> bool:
+    """True when a jump goes through a register or through memory.
+
+    `jmp *%rax` and `jmp qword ptr [rax]` both land here. The address only
+    exists once the program is running, so there's no name in the operand to
+    compare against anything, and the table it came out of points back into
+    this same function anyway.
+    """
+    if operand.startswith("*"):
+        return True
+    if any(bracket in operand for bracket in MEMORY_BRACKETS):
+        return True
+    return operand in ADDRESS_REGISTERS
+
+
+def _final_instruction(asm: str) -> tuple[int, str, list[str]] | None:
+    """The last instruction in the body: its line, mnemonic and operands.
+
+    None when there are no instructions in there at all. Whatever the compiler
+    leaves underneath doesn't count — gcc writes .cfi_endproc and a .size line
+    after the last instruction and clang doesn't, and neither of them is code,
+    so the function ends in the same place either way.
+    """
+    found = None
+    for number, line in enumerate(asm.splitlines(), start=1):
+        parsed = _parse_instruction(line)
+        if parsed is not None:
+            mnemonic, operands = parsed
+            found = (number, mnemonic, operands)
+    return found
+
+
+def tail_jump_line(asm: str) -> int | None:
+    """Which line jumps away to another function, when that's how the body ends.
+
+    Three things have to hold, and each one rules out something that looks
+    similar. The last instruction is an unconditional jump: a conditional one
+    falls through to more of our own code, so the function isn't finished with
+    it. The target is a name rather than a register, since an indirect jump is
+    a jump table landing back inside here. And the name isn't a label this body
+    defines, because a jump to one of those is a loop or an if.
+    """
+    final = _final_instruction(asm)
+    if final is None:
+        return None
+
+    number, mnemonic, operands = final
+    if mnemonic not in UNCONDITIONAL_JUMPS or len(operands) != 1:
+        return None
+
+    target = operands[0]
+    if _is_indirect(target) or target in _local_labels(asm):
+        return None
+    return number
+
+
+def detect_tail_call(asm: str) -> Annotation | None:
+    """Spot a call at the end of a function that became a jump.
+
+    `return helper(x);` at -O0 is a call and then a ret. helper gets a stack
+    frame of its own, does its work, returns here, and this function turns
+    round and passes the same value straight back up. That middle stop is
+    wasted — there is nothing left to do here once helper is done. So the
+    optimizer drops the ret and jumps to helper instead of calling it: helper
+    reuses the frame that's already there and returns to our caller directly.
+
+    Worth a frame and a return each time, and it's also what lets deep
+    recursion finish. A tail-recursive function that jumps instead of calling
+    stops stacking frames up, so it can't run the stack out.
+
+    One body is enough here, which the last few detectors couldn't say. They
+    need the -O0 build because the shape they look for could have been written
+    that way by hand. This one couldn't: C has no way to say "go to that
+    function and don't come back", so a jump standing where a call belongs is
+    always something the compiler did.
+
+    A function that tail-calls itself is the case this misses. That one comes
+    out as a jump to a label just inside the same function, which is a loop by
+    the time it's asm and reads as one — `has_loop_branch` is what finds it.
+
+    Takes the asm for a single function, same as the other detectors.
+    """
+    line = tail_jump_line(asm)
+    if line is None:
+        return None
+
+    return Annotation(TAIL_CALL, line, line, TAIL_CALL_DESCRIPTION)
 
 
 def run_annotate(path: Path) -> None:
