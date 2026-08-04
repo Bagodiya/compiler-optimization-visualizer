@@ -17,13 +17,16 @@ from compopt.annotate import (
     CONSTANT_FOLDING,
     DEAD_CODE_ELIMINATION,
     FRAME_ELIMINATION,
+    INLINING,
     LOOP_UNROLLING,
     REGISTER_COALESCING,
     TAIL_CALL,
     Annotation,
+    called_functions,
     detect_constant_folding,
     detect_dead_code_elimination,
     detect_frame_elimination,
+    detect_inlining,
     detect_loop_unrolling,
     detect_register_coalescing,
     detect_tail_call,
@@ -360,6 +363,58 @@ CONDITIONAL_TAIL = """check:
 \ttestl\t%edi, %edi
 \tjne\thelper
 \txorl\t%eax, %eax
+\tret
+"""
+
+# the same `return helper(x + 1);` as TAIL_CALLER, but with helper small enough
+# to copy in: the call is gone and what helper did — doubling its argument — is
+# sitting here now, folded together with the add that used to set it up
+INLINED = """wrapper:
+\tleal\t1(%rdi), %eax
+\taddl\t%eax, %eax
+\tret
+"""
+
+# two helpers at -O0, only one of which is worth copying in
+CALLS_TWO = """wrapper:
+\tpushq\t%rbp
+\tmovq\t%rsp, %rbp
+\tcall\thelper
+\tcall\tslow_path
+\tpopq\t%rbp
+\tret
+"""
+
+# and at -O2, with helper inlined and slow_path still called
+ONE_OF_TWO = """wrapper:
+\taddl\t$1, %edi
+\tcall\tslow_path
+\tret
+"""
+
+# a call through a function pointer — the operand is a register, so nothing in
+# the line says which function this ends up in
+INDIRECT_CALL = """dispatch:
+\tmovq\thandler(%rip), %rax
+\tcall\t*%rax
+\tret
+"""
+
+INTEL_INDIRECT_CALL = """dispatch:
+\tmov\trax, qword ptr [rip + handler]
+\tcall\trax
+\tret
+"""
+
+INTEL_CALLS = """wrapper:
+\tadd\tedi, 1
+\tcall\thelper
+\tret
+"""
+
+INTEL_INLINED = """wrapper:
+\tlea\teax, [rdi + 1]
+\tadd\teax, eax
 \tret
 """
 
@@ -768,6 +823,78 @@ def test_a_body_that_just_returns_has_no_tail_call() -> None:
 def test_a_body_with_no_instructions_has_no_tail_call() -> None:
     assert detect_tail_call("") is None
     assert detect_tail_call("wrapper:\n\t.cfi_startproc\n") is None
+
+
+def test_called_functions_names_direct_calls() -> None:
+    assert called_functions(CALLS_TWO) == {"helper", "slow_path"}
+    assert called_functions(INTEL_CALLS) == {"helper"}
+
+
+def test_called_functions_skips_indirect_calls() -> None:
+    # there's a call in both of these, but no name to record for it
+    assert called_functions(INDIRECT_CALL) == set()
+    assert called_functions(INTEL_INDIRECT_CALL) == set()
+
+
+def test_a_body_without_calls_calls_nothing() -> None:
+    assert called_functions(FLAT) == set()
+    assert called_functions("") == set()
+
+
+def test_a_vanished_callee_is_annotated() -> None:
+    note = detect_inlining(TAIL_CALLER, INLINED)
+    assert note is not None
+    assert note.name == INLINING
+    assert note.description
+
+
+def test_inlining_covers_the_optimized_body() -> None:
+    # line 1 is the label, so the range is the lea on line 2 through the ret
+    # on line 4 — the copied instructions are in there with the rest
+    note = detect_inlining(TAIL_CALLER, INLINED)
+    assert note is not None
+    assert (note.start, note.end) == (2, 4)
+
+
+def test_a_callee_still_called_is_not_inlined() -> None:
+    assert detect_inlining(TAIL_CALLER, TAIL_CALLER) is None
+
+
+def test_a_tail_call_is_not_inlining() -> None:
+    # the call became a jump, so helper still runs — only the return trip went
+    assert detect_tail_call(TAIL_JUMPED) is not None
+    assert detect_inlining(TAIL_CALLER, TAIL_JUMPED) is None
+
+
+def test_one_callee_of_two_still_counts() -> None:
+    note = detect_inlining(CALLS_TWO, ONE_OF_TWO)
+    assert note is not None
+    assert (note.start, note.end) == (2, 4)
+
+
+def test_inlining_found_in_intel_syntax() -> None:
+    note = detect_inlining(INTEL_CALLS, INTEL_INLINED)
+    assert note is not None
+    assert (note.start, note.end) == (2, 4)
+
+
+def test_nothing_to_inline_without_a_call_first() -> None:
+    assert detect_inlining(FRAMED, FLAT) is None
+
+
+def test_an_indirect_call_leaves_nothing_to_follow() -> None:
+    # the name was never in the baseline either, so there's nothing to miss
+    assert detect_inlining(INDIRECT_CALL, FLAT) is None
+
+
+def test_a_missing_side_has_nothing_to_inline() -> None:
+    assert detect_inlining("", INLINED) is None
+    assert detect_inlining(TAIL_CALLER, "") is None
+    assert detect_inlining("", "") is None
+
+
+def test_a_body_with_no_instructions_is_not_inlined() -> None:
+    assert detect_inlining(TAIL_CALLER, "wrapper:\n\t.cfi_startproc\n") is None
 
 
 def test_annotate_names_the_file(tmp_path: Path) -> None:

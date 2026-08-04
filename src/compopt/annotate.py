@@ -86,6 +86,11 @@ ADDRESS_REGISTERS = frozenset(
     }
 )
 
+# the two spellings of a call. same story as the push and move mnemonics at the
+# top of the file: only a couple of them ever turn up, so listing them reads
+# better than taking letters off the end.
+CALL_MNEMONICS = ("call", "callq")
+
 # instructions that mean the machine is still working something out at run
 # time. only the stems are listed: the sized spellings (addl, subq, imull...)
 # come off the same stem, and there are far too many combinations to write out
@@ -152,6 +157,13 @@ TAIL_CALL_DESCRIPTION = (
     "the last thing the function does is hand over to another one, and it "
     "jumps there rather than calling it and waiting, so nothing comes back "
     "here — the callee borrows this frame and returns straight to our caller"
+)
+
+INLINING = "inlining"
+INLINING_DESCRIPTION = (
+    "a function this one used to call isn't called any more, because its body "
+    "was copied in here instead — so the work happens in place, with no "
+    "arguments to arrange, no jump away and no trip back"
 )
 
 # push the base pointer, aim it at the stack, pop it back off at the end. that
@@ -831,6 +843,118 @@ def detect_tail_call(asm: str) -> Annotation | None:
         return None
 
     return Annotation(TAIL_CALL, line, line, TAIL_CALL_DESCRIPTION)
+
+
+def _call_target(mnemonic: str, operands: list[str]) -> str | None:
+    """The function a call names, or None when the line isn't a direct call.
+
+    A call through a pointer — `call *%rax`, or the Intel spelling through
+    memory — drops out here, the same way `_jump_target` lets an indirect jump
+    fall through. There's no name in the operand to hold against the other
+    build, so a callee reached that way can't be followed either side.
+    """
+    if mnemonic not in CALL_MNEMONICS or len(operands) != 1:
+        return None
+    target = operands[0]
+    return None if _is_indirect(target) else target
+
+
+def called_functions(asm: str) -> set[str]:
+    """Every function the body calls by name, lowercased.
+
+    A set and not a count, because the question underneath is whether a given
+    callee is still reached at all, and two calls to the same helper answer
+    that once between them. The cost is a function called from two places with
+    only one of them inlined: the other call keeps the name in here and the
+    half that was copied in goes unreported.
+    """
+    names: set[str] = set()
+    for line in asm.splitlines():
+        parsed = _parse_instruction(line)
+        if parsed is None:
+            continue
+        target = _call_target(*parsed)
+        if target is not None:
+            names.add(target)
+    return names
+
+
+def _outward_jumps(asm: str) -> set[str]:
+    """Names the body jumps to that aren't labels it defines itself.
+
+    Which is to say the functions it leaves for without meaning to come back —
+    tail calls, by the time they're asm. `tail_jump_line` asks the same thing
+    of the last instruction only, since that's where a tail call has to be;
+    here every jump counts, because all that matters below is whether the name
+    is still reachable somehow.
+    """
+    local = _local_labels(asm)
+    targets: set[str] = set()
+    for line in asm.splitlines():
+        parsed = _parse_instruction(line)
+        if parsed is None:
+            continue
+        target = _jump_target(*parsed)
+        if target is not None and not _is_indirect(target) and target not in local:
+            targets.add(target)
+    return targets
+
+
+def inlined_callees(baseline: str, optimized: str) -> set[str]:
+    """Functions the baseline calls that the optimized build never reaches.
+
+    Neither by a call nor by a jump. Taking the jumps out is what keeps a tail
+    call from landing in here: `call helper` becoming `jmp helper` loses the
+    call, but helper still runs, so nothing about it was copied in.
+    """
+    gone = called_functions(baseline) - called_functions(optimized)
+    return gone - _outward_jumps(optimized)
+
+
+def detect_inlining(baseline: str, optimized: str) -> Annotation | None:
+    """Spot a callee whose body was copied into this function.
+
+    A call isn't free. The arguments have to go in the registers the ABI asks
+    for, the return address gets pushed, control leaves, and the callee sets up
+    a frame of its own before it does any of the work. For a helper that's a
+    few instructions long, all of that costs more than the helper does. So the
+    compiler writes the helper's instructions straight into the caller and
+    deletes the call — and then the two sides are one body, which is what makes
+    it worth doing beyond the call itself: constants from here fold into work
+    from there, and the optimizations after it see the whole thing at once.
+
+    Two bodies again, for the reason `detect_dead_code_elimination` needs them.
+    Inlining leaves no shape behind — the copied instructions are ordinary
+    instructions and nothing marks where they came from. All you can see is a
+    name that used to be called and isn't. That has to come from the -O0 build.
+
+    A call that turned into a jump is excluded, since the callee is still doing
+    its own work and only the return trip went; that one is `detect_tail_call`.
+    What isn't excluded is a call the compiler deleted outright, which it may
+    do when it can prove the callee has no side effects and nothing reads the
+    result. That reads exactly the same from here and gets reported as
+    inlining. Same trade as the detectors above: the asm says the callee went,
+    not where it went to.
+
+    The annotation covers the whole optimized body rather than a line, because
+    the copied instructions are spread through it with nothing separating them
+    from the caller's own. Phase 5 is where that gets narrowed down — gcc names
+    the callee and the line it inlined it into, and we don't have to guess.
+
+    Takes the asm for one function at each level, low first.
+    """
+    if not baseline.strip() or not optimized.strip():
+        return None
+
+    if not inlined_callees(baseline, optimized):
+        return None
+
+    span = _instruction_line_range(optimized)
+    if span is None:
+        return None
+
+    start, end = span
+    return Annotation(INLINING, start, end, INLINING_DESCRIPTION)
 
 
 def run_annotate(path: Path) -> None:
