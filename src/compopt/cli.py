@@ -128,10 +128,47 @@ def diff(
 
 @app.command()
 def annotate(
-    path: Annotated[Path, typer.Argument(help="C source file to inspect.")],
+    # optional so --explain can answer without a file to look at
+    path: Annotated[
+        Path | None,
+        typer.Argument(help="C source file to inspect."),
+    ] = None,
+    level: Annotated[
+        str,
+        typer.Option("--level", "-O", help="Optimization level to annotate."),
+    ] = "2",
+    func: Annotated[
+        str | None,
+        typer.Option("--func", "-f", help="Which function to annotate."),
+    ] = None,
+    summary: Annotated[
+        bool,
+        typer.Option("--summary", "-s", help="List the optimizations without the asm."),
+    ] = False,
+    explain: Annotated[
+        str | None,
+        typer.Option("--explain", help="Describe one optimization by name and exit."),
+    ] = None,
+    no_color: Annotated[
+        bool,
+        typer.Option("--no-color", help="Disable color in the output."),
+    ] = False,
+    width: Annotated[
+        int | None,
+        typer.Option("--width", help="Force the output width instead of measuring the terminal."),
+    ] = None,
+    compiler: Annotated[
+        str | None,
+        typer.Option("--compiler", "-c", help="Which compiler to use: gcc or clang."),
+    ] = None,
 ) -> None:
     """Name the optimizations the compiler applied to a source file."""
-    run_annotate(path)
+    try:
+        run_annotate(path, level, func, summary, explain, no_color, width, compiler)
+    except CompileError as err:
+        typer.echo(f"error: {err.compiler} could not compile {path}", err=True)
+        typer.echo(err.message, err=True)
+        raise typer.Exit(code=1) from err
 
 
 if __name__ == "__main__":

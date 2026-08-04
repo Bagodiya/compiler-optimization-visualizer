@@ -3,8 +3,9 @@
 Some of these build annotations by hand and check the range bookkeeping — the
 part every detector depends on. The rest feed hand-written function bodies to
 the detectors, one body per case, so it's obvious from the sample what's meant
-to be found. The command itself is still a skeleton, so those tests only check
-it validates the file it was handed.
+to be found. The few at the bottom drive the command against a real compiler
+and only check the shape of what comes back, since which optimizations a given
+gcc or clang applies is not ours to promise.
 """
 
 import dataclasses
@@ -14,31 +15,48 @@ import pytest
 from typer.testing import CliRunner
 
 from compopt.annotate import (
+    BRANCH_ELIMINATION,
     CONSTANT_FOLDING,
     DEAD_CODE_ELIMINATION,
     FRAME_ELIMINATION,
     INLINING,
     LOOP_UNROLLING,
     REGISTER_COALESCING,
+    STRENGTH_REDUCTION,
     TAIL_CALL,
+    VECTORIZATION,
     Annotation,
     called_functions,
+    detect_branch_elimination,
     detect_constant_folding,
     detect_dead_code_elimination,
     detect_frame_elimination,
     detect_inlining,
     detect_loop_unrolling,
     detect_register_coalescing,
+    detect_strength_reduction,
     detect_tail_call,
+    detect_vectorization,
+    explain,
+    find_annotations,
+    has_conditional_branch,
     has_frame_setup,
     has_loop_branch,
     instruction_count,
+    match_name,
     tail_jump_line,
     uses_stack_slots,
+    vector_line_range,
 )
 from compopt.cli import app
+from compopt.compilers import find_compilers
 
 runner = CliRunner()
+
+# the end-to-end ones need a real toolchain to have any asm to annotate
+needs_compiler = pytest.mark.skipif(
+    not find_compilers(), reason="no gcc or clang available"
+)
 
 # what -O0 looks like: rbp is saved, aimed at the stack, and every local is
 # addressed off it. the .cfi line is in there on purpose — it sits between the
@@ -897,15 +915,6 @@ def test_a_body_with_no_instructions_is_not_inlined() -> None:
     assert detect_inlining(TAIL_CALLER, "wrapper:\n\t.cfi_startproc\n") is None
 
 
-def test_annotate_names_the_file(tmp_path: Path) -> None:
-    src = tmp_path / "hello.c"
-    src.write_text("int add(int a, int b) { return a + b; }\n")
-
-    result = runner.invoke(app, ["annotate", str(src)])
-    assert result.exit_code == 0
-    # the placeholder should at least say which file it would work on
-    assert "hello.c" in result.stdout
-
 
 def test_annotate_missing_file(tmp_path: Path) -> None:
     missing = tmp_path / "nope.c"
@@ -924,3 +933,406 @@ def test_annotate_shows_up_in_help() -> None:
     result = runner.invoke(app, ["--help"])
     assert result.exit_code == 0
     assert "annotate" in result.stdout
+
+
+def test_find_annotations_runs_every_detector() -> None:
+    # FRAMED against FLAT is the whole set at once: the prologue went, the
+    # locals came off the stack, and the body lost instructions doing it
+    found = find_annotations(FRAMED, FLAT)
+    names = {note.name for note in found}
+    assert FRAME_ELIMINATION in names
+    assert REGISTER_COALESCING in names
+    assert DEAD_CODE_ELIMINATION in names
+
+
+def test_find_annotations_reads_top_to_bottom() -> None:
+    # whatever order the detectors are listed in, the notes come out in the
+    # order you meet them reading down the asm
+    found = find_annotations(FRAMED, FLAT)
+    assert [note.start for note in found] == sorted(note.start for note in found)
+
+
+def test_find_annotations_breaks_ties_on_the_shorter_span() -> None:
+    # UNFOLDED to FOLDED puts a whole-body note and a single-line note on the
+    # same body; the narrow one is the more specific thing to say first
+    found = find_annotations(UNFOLDED, FOLDED)
+    same_start = [note for note in found if note.start == found[0].start]
+    assert [note.span for note in same_start] == sorted(note.span for note in same_start)
+
+
+def test_find_annotations_finds_nothing_in_an_unoptimized_body() -> None:
+    # -O0 against itself: the paired detectors have nothing to compare and the
+    # single-body ones are looking at code nobody has touched
+    assert find_annotations(FRAMED, FRAMED) == []
+
+
+def test_find_annotations_of_an_empty_body() -> None:
+    assert find_annotations("", "") == []
+
+
+
+def test_annotate_rejects_a_level_we_cant_compile(tmp_path: Path) -> None:
+    src = tmp_path / "hello.c"
+    src.write_text("int add(int a, int b) { return a + b; }\n")
+
+    result = runner.invoke(app, ["annotate", str(src), "--level", "9"])
+    assert result.exit_code == 1
+
+
+@needs_compiler
+def test_annotate_prints_the_asm_and_the_level(tmp_path: Path) -> None:
+    src = tmp_path / "hello.c"
+    src.write_text("int add(int a, int b) { return a + b; }\n")
+
+    result = runner.invoke(app, ["annotate", str(src), "--no-color", "--width", "200"])
+    assert result.exit_code == 0
+    assert "-O2" in result.stdout
+    assert "add" in result.stdout
+
+
+@needs_compiler
+def test_annotate_accepts_the_o_spelling(tmp_path: Path) -> None:
+    src = tmp_path / "hello.c"
+    src.write_text("int add(int a, int b) { return a + b; }\n")
+
+    spelled = runner.invoke(app, ["annotate", str(src), "--level", "O2",
+                                  "--no-color", "--width", "200"])
+    bare = runner.invoke(app, ["annotate", str(src), "--level", "2",
+                               "--no-color", "--width", "200"])
+    assert spelled.exit_code == 0
+    assert spelled.stdout == bare.stdout
+
+
+@needs_compiler
+def test_annotate_names_what_it_found(tmp_path: Path) -> None:
+    src = tmp_path / "fold.c"
+    # every compiler folds this one, so the name is safe to assert on
+    src.write_text("int compute(void) { int a = 7 * 6; return a + 158; }\n")
+
+    result = runner.invoke(app, ["annotate", str(src), "--no-color", "--width", "200"])
+    assert result.exit_code == 0
+    assert CONSTANT_FOLDING in result.stdout
+    assert "found" in result.stdout
+
+
+
+@needs_compiler
+def test_annotate_at_zero_finds_nothing(tmp_path: Path) -> None:
+    src = tmp_path / "hello.c"
+    src.write_text("int add(int a, int b) { return a + b; }\n")
+
+    result = runner.invoke(app, ["annotate", str(src), "--level", "0",
+                                 "--no-color", "--width", "200"])
+    assert result.exit_code == 0
+    assert "no optimizations detected" in result.stdout
+
+
+@needs_compiler
+def test_annotate_unknown_func_lists_what_is_there(tmp_path: Path) -> None:
+    src = tmp_path / "hello.c"
+    src.write_text("int add(int a, int b) { return a + b; }\n")
+
+    result = runner.invoke(app, ["annotate", str(src), "--func", "nope"])
+    assert result.exit_code == 1
+    assert "add" in result.stdout + result.stderr
+
+
+@needs_compiler
+def test_annotate_bad_source_reports_the_compiler(tmp_path: Path) -> None:
+    src = tmp_path / "broken.c"
+    src.write_text("int main(void) { return }\n")
+
+    result = runner.invoke(app, ["annotate", str(src)])
+    assert result.exit_code == 1
+
+
+@needs_compiler
+def test_annotate_reports_a_function_that_got_inlined_away(tmp_path: Path) -> None:
+    src = tmp_path / "inline.c"
+    # static and called once, so both compilers copy it in and stop emitting it
+    src.write_text(
+        "static int helper(int x) { return x + 1; }\n"
+        "int wrapper(int x) { return helper(x) * 2; }\n"
+    )
+
+    result = runner.invoke(app, ["annotate", str(src), "--func", "helper",
+                                 "--no-color", "--width", "200"])
+    # the name was in the -O0 build, so this is a result and not a typo
+    assert result.exit_code == 0
+    assert "gone at -O2" in result.stdout
+
+
+@needs_compiler
+def test_annotate_a_file_with_no_functions_in_it(tmp_path: Path) -> None:
+    src = tmp_path / "nothing.c"
+    src.write_text("typedef int myint;\n")
+
+    result = runner.invoke(app, ["annotate", str(src), "--no-color"])
+    assert result.exit_code == 0
+    assert "no functions to annotate" in result.stdout
+
+
+# `t += i * 7` at -O0: the multiply is done every trip round the loop
+MULTIPLIES = """f:
+\tmovl\t-8(%rbp), %eax
+\timull\t$7, %eax, %eax
+\taddl\t%eax, -4(%rbp)
+\tret
+"""
+
+# and at -O2, where the same total is reached by adding 7 each time instead
+REDUCED = """f:
+\tleal\t(%rax,%rax,2), %edx
+\taddl\t%edx, %eax
+\tret
+"""
+
+# the multiply went and nothing cheap replaced it, which is the compiler
+# deciding nothing read the result rather than finding a shorter route to it
+MULTIPLY_DELETED = """f:
+\txorl\t%eax, %eax
+\tret
+"""
+
+# an unsigned divide by a power of two, and the shift that stands in for it
+DIVIDES = """f:
+\tmovl\t-4(%rbp), %eax
+\tdivl\t$4
+\tret
+"""
+
+REDUCED_DIVIDE = """f:
+\tmovl\t%edi, %eax
+\tshrl\t$2, %eax
+\tret
+"""
+
+# `a > b ? a : b` at -O2 — both arms are computed and the answer picked at the
+# end, so there's a compare but nothing to mispredict
+CONDITIONAL_MOVE = """max:
+\tmovl\t%edi, %eax
+\tcmpl\t%esi, %edi
+\tcmovlel\t%esi, %eax
+\tret
+"""
+
+# four floats added at once
+PACKED_FLOATS = """addup:
+\tmovaps\t(%rdi), %xmm0
+\taddps\t(%rsi), %xmm0
+\tmovaps\t%xmm0, (%rdi)
+\tret
+"""
+
+# the same registers doing one value at a time, which is ordinary float code
+SCALAR_FLOATS = """addone:
+\tmovss\t(%rdi), %xmm0
+\taddss\t(%rsi), %xmm0
+\tmovss\t%xmm0, (%rdi)
+\tret
+"""
+
+# integer vector work, marked with a p on the front instead of a suffix
+PACKED_INTS = """addup:
+\tmovdqu\t(%rdi), %xmm0
+\tpaddd\t(%rsi), %xmm0
+\tret
+"""
+
+WIDE_VECTORS = """addup:
+\tvaddps\t(%rsi), %ymm0, %ymm0
+\tret
+"""
+
+
+def test_conditional_branch_found() -> None:
+    assert has_conditional_branch(BRANCHY)
+    assert has_conditional_branch(LOOPED)
+
+
+def test_an_unconditional_jump_is_not_a_condition() -> None:
+    # the jump always goes, so nothing is being decided
+    assert not has_conditional_branch(TAIL_JUMPED)
+    assert not has_conditional_branch(SPINS)
+
+
+def test_a_straight_line_body_has_no_branch() -> None:
+    assert not has_conditional_branch(FLAT)
+    assert not has_conditional_branch("")
+
+
+def test_a_swapped_multiply_is_annotated() -> None:
+    note = detect_strength_reduction(MULTIPLIES, REDUCED)
+    assert note is not None
+    assert note.name == STRENGTH_REDUCTION
+    assert note.description
+
+
+def test_a_swapped_divide_counts_too() -> None:
+    assert detect_strength_reduction(DIVIDES, REDUCED_DIVIDE) is not None
+
+
+def test_a_multiply_that_stayed_is_not_reduced() -> None:
+    assert detect_strength_reduction(MULTIPLIES, MULTIPLIES) is None
+
+
+def test_a_deleted_multiply_is_not_reduced() -> None:
+    # nothing cheap turned up in its place, so this is dead code and belongs
+    # to the detector that counts instructions
+    assert detect_strength_reduction(MULTIPLIES, MULTIPLY_DELETED) is None
+
+
+def test_nothing_to_reduce_without_an_expensive_instruction() -> None:
+    assert detect_strength_reduction(FLAT, REDUCED) is None
+
+
+def test_a_missing_side_has_nothing_to_reduce() -> None:
+    assert detect_strength_reduction("", REDUCED) is None
+    assert detect_strength_reduction(MULTIPLIES, "") is None
+
+
+def test_a_lost_branch_is_annotated() -> None:
+    note = detect_branch_elimination(BRANCHY, CONDITIONAL_MOVE)
+    assert note is not None
+    assert note.name == BRANCH_ELIMINATION
+    assert note.description
+
+
+def test_a_branch_that_is_still_there_is_not_eliminated() -> None:
+    assert detect_branch_elimination(BRANCHY, BRANCHY) is None
+
+
+def test_nothing_eliminated_without_a_branch_first() -> None:
+    # FLAT never had a condition in it, so its not having one now says nothing
+    assert detect_branch_elimination(FLAT, CONDITIONAL_MOVE) is None
+
+
+def test_a_missing_side_has_no_branch_to_lose() -> None:
+    assert detect_branch_elimination("", CONDITIONAL_MOVE) is None
+    assert detect_branch_elimination(BRANCHY, "") is None
+
+
+def test_unrolling_wins_over_branch_elimination() -> None:
+    # unrolling a loop takes its branch away, so both fire on the same body;
+    # reporting each of them would be naming one thing the compiler did twice
+    names = {note.name for note in find_annotations(LOOPED, UNROLLED)}
+    assert LOOP_UNROLLING in names
+    assert BRANCH_ELIMINATION not in names
+
+
+def test_branch_elimination_survives_on_its_own() -> None:
+    # nothing was unrolled here, so it is the only thing that explains the
+    # missing jump and it has to come through
+    names = {note.name for note in find_annotations(BRANCHY, CONDITIONAL_MOVE)}
+    assert BRANCH_ELIMINATION in names
+
+
+def test_packed_floats_are_vectorized() -> None:
+    note = detect_vectorization(PACKED_FLOATS)
+    assert note is not None
+    assert note.name == VECTORIZATION
+    assert note.description
+
+
+def test_packed_integers_are_vectorized() -> None:
+    assert detect_vectorization(PACKED_INTS) is not None
+
+
+def test_wider_registers_count() -> None:
+    assert detect_vectorization(WIDE_VECTORS) is not None
+
+
+def test_scalar_floating_point_is_not_vectorized() -> None:
+    # the same xmm registers, one value at a time — this is what ordinary
+    # double arithmetic compiles to and it is not vector work
+    assert detect_vectorization(SCALAR_FLOATS) is None
+
+
+def test_integer_code_is_not_vectorized() -> None:
+    assert detect_vectorization(FLAT) is None
+    assert detect_vectorization("") is None
+
+
+def test_vector_range_covers_only_the_vector_instructions() -> None:
+    # line 1 is the label and line 5 is the ret, so the range is lines 2 to 4
+    assert vector_line_range(PACKED_FLOATS) == (2, 4)
+
+
+def test_vector_range_of_a_body_without_any() -> None:
+    assert vector_line_range(SCALAR_FLOATS) is None
+
+
+def test_explain_knows_every_name_a_detector_can_produce() -> None:
+    # a detector naming something --explain can't look up would leave the user
+    # with a name on screen and no way to ask what it means
+    for name in (FRAME_ELIMINATION, CONSTANT_FOLDING, REGISTER_COALESCING,
+                 DEAD_CODE_ELIMINATION, LOOP_UNROLLING, TAIL_CALL, INLINING,
+                 STRENGTH_REDUCTION, BRANCH_ELIMINATION, VECTORIZATION):
+        assert explain(name)
+
+
+def test_explain_ignores_case_and_separators() -> None:
+    # the names have spaces in them, so hyphens save the user quoting them
+    assert explain("Dead-Code-Elimination") == explain(DEAD_CODE_ELIMINATION)
+    assert explain("dead_code_elimination") == explain(DEAD_CODE_ELIMINATION)
+
+
+def test_explain_takes_a_unique_prefix() -> None:
+    assert match_name("inlin") == INLINING
+    assert match_name("vector") == VECTORIZATION
+
+
+def test_explain_refuses_an_ambiguous_prefix() -> None:
+    # "constant folding" and "branch elimination" both start with a c and a b
+    # respectively, but a bare "b" reaches only one of them; "s" reaches both
+    # stack frame elimination and strength reduction, so it has to decline
+    assert match_name("s") is None
+
+
+def test_explain_of_something_we_dont_know() -> None:
+    assert explain("quantum tunnelling") is None
+
+
+def test_annotate_explain_prints_the_description() -> None:
+    # no file involved: this is a lookup, not an analysis
+    result = runner.invoke(app, ["annotate", "--explain", "inlining"])
+    assert result.exit_code == 0
+    assert INLINING in result.stdout
+
+
+def test_annotate_explain_of_an_unknown_name_lists_the_real_ones() -> None:
+    result = runner.invoke(app, ["annotate", "--explain", "wibble"])
+    assert result.exit_code == 1
+    assert INLINING in result.stdout + result.stderr
+
+
+def test_annotate_with_no_file_and_no_explain_is_an_error() -> None:
+    result = runner.invoke(app, ["annotate"])
+    assert result.exit_code == 1
+
+
+@needs_compiler
+def test_annotate_summary_drops_the_asm(tmp_path: Path) -> None:
+    src = tmp_path / "fold.c"
+    src.write_text("int compute(void) { int a = 7 * 6; return a + 158; }\n")
+
+    full = runner.invoke(app, ["annotate", str(src), "--no-color", "--width", "200"])
+    brief = runner.invoke(app, ["annotate", str(src), "--summary",
+                                "--no-color", "--width", "200"])
+    assert brief.exit_code == 0
+    # the findings survive, the instructions they were sitting next to don't
+    assert CONSTANT_FOLDING in brief.stdout
+    assert "movl" in full.stdout
+    assert "movl" not in brief.stdout
+
+
+@needs_compiler
+def test_annotate_lists_a_description_for_each_finding(tmp_path: Path) -> None:
+    src = tmp_path / "fold.c"
+    src.write_text("int compute(void) { int a = 7 * 6; return a + 158; }\n")
+
+    result = runner.invoke(app, ["annotate", str(src), "--summary",
+                                 "--no-color", "--width", "200"])
+    assert result.exit_code == 0
+    # a name on its own doesn't tell you what the compiler did
+    assert explain(CONSTANT_FOLDING).split(",")[0] in result.stdout

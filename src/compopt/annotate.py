@@ -3,16 +3,35 @@
 Everything in the annotation engine ends up as an Annotation. A detector reads
 the asm for a function, decides that (say) the stack frame is gone, and hands
 back an Annotation naming that along with the lines it applies to. The
-renderer later prints them next to those lines.
+renderer prints them next to those lines.
 
-So far this is the shape they all share, the command wiring, and the
-detectors written up to now; the rest of them get added underneath.
+Every detector takes the asm for one function — what `asm.isolate_function`
+hands back, not a whole translation unit. The ones looking for something
+visible in the optimized build take one body; the ones looking for something
+that stopped being there take two, lowest level first.
+
+The shape they all share comes first, then the detectors, then the command
+that runs the lot of them over one function.
 """
 
 from dataclasses import dataclass
 from pathlib import Path
 
 import typer
+from rich.console import Console
+
+from compopt.asm import find_function, function_names, isolate_function, strip_directives
+from compopt.compilers import (
+    check_level,
+    choose_compiler,
+    compile_at_levels,
+    normalize_level,
+)
+from compopt.render import render_annotated
+
+# the level everything is compared against. the detectors that need two bodies
+# need one where the compiler hasn't done anything yet, and that's -O0.
+BASELINE_LEVEL = "0"
 
 # The same prologue gets written two different ways depending on the syntax:
 #
@@ -119,6 +138,30 @@ ARITHMETIC_STEMS = frozenset(
 )
 SIZE_SUFFIXES = ("b", "w", "l", "q")
 
+# the instructions worth going out of your way to avoid. a multiply takes a few
+# cycles and a divide takes tens of them, against one for a shift, which is the
+# whole reason the compiler trades them away.
+EXPENSIVE_STEMS = frozenset({"mul", "imul", "div", "idiv"})
+
+# and what it trades them for. lea is in here because it adds and shifts in one
+# instruction without touching the flags, which makes it the usual landing
+# place for a multiply by a constant that isn't a power of two.
+CHEAP_STEMS = frozenset({"shl", "sal", "shr", "sar", "lea", "add", "sub"})
+
+# the wide registers. only the prefix is listed: the numbering runs to xmm15 on
+# its own and further with the wider forms, and none of that changes the answer.
+VECTOR_REGISTERS = ("xmm", "ymm", "zmm")
+
+# floating point comes in two flavours out of the same registers. `ss` and `sd`
+# are one value, `ps` and `pd` are a register full of them, and that suffix is
+# the only thing separating ordinary double arithmetic from vector work.
+SCALAR_SUFFIXES = ("ss", "sd")
+PACKED_SUFFIXES = ("ps", "pd", "dq", "dqa", "dqu")
+
+# integer vector instructions are marked on the front instead — paddd, pmulld,
+# pcmpeqb. nothing scalar starts with a p, so the prefix is enough on its own.
+PACKED_PREFIX = "p"
+
 FRAME_ELIMINATION = "stack frame elimination"
 FRAME_ELIMINATION_DESCRIPTION = (
     "the prologue that saves the caller's base pointer and aims it at the stack "
@@ -157,6 +200,27 @@ TAIL_CALL_DESCRIPTION = (
     "the last thing the function does is hand over to another one, and it "
     "jumps there rather than calling it and waiting, so nothing comes back "
     "here — the callee borrows this frame and returns straight to our caller"
+)
+
+STRENGTH_REDUCTION = "strength reduction"
+STRENGTH_REDUCTION_DESCRIPTION = (
+    "a multiply or a divide was swapped for shifts and adds that reach the "
+    "same answer, because the operand turned out to be something the cheap "
+    "instructions could handle"
+)
+
+BRANCH_ELIMINATION = "branch elimination"
+BRANCH_ELIMINATION_DESCRIPTION = (
+    "the condition no longer decides where to go — either the compiler worked "
+    "out which way it went and kept that arm, or it computed both sides and "
+    "picked the answer with a conditional move, so nothing can mispredict"
+)
+
+VECTORIZATION = "vectorization"
+VECTORIZATION_DESCRIPTION = (
+    "the work is being done on several values at a time in the wide registers "
+    "rather than one per trip round the loop, so each instruction here is "
+    "doing what took four or eight of them before"
 )
 
 INLINING = "inlining"
@@ -343,9 +407,6 @@ def detect_frame_elimination(asm: str) -> Annotation | None:
     instruction — the line the prologue used to occupy. Returns None when the
     frame is still there, and for a body with no instructions in it, since
     nothing was eliminated from a function that has no code.
-
-    Takes the asm for a single function (what `asm.isolate_function` returns),
-    not a whole translation unit.
     """
     if has_frame_setup(asm):
         return None
@@ -451,8 +512,6 @@ def detect_constant_folding(asm: str) -> Annotation | None:
     against the -O0 build would settle it, and the diff command already
     knows how to line two levels up, but a detector only gets one body — so
     this reports the shape it sees and takes the false positive.
-
-    Takes the asm for a single function, same as the other detectors.
     """
     line = _literal_return_line(asm)
     if line is None:
@@ -513,8 +572,6 @@ def detect_register_coalescing(asm: str) -> Annotation | None:
     The annotation covers the whole body rather than a single line, since it's
     the shape of all the instructions together that shows it, not any one of
     them. None comes back for a body with nothing in it to keep in registers.
-
-    Takes the asm for a single function, same as the other detectors.
     """
     if uses_stack_slots(asm):
         return None
@@ -570,10 +627,8 @@ def detect_dead_code_elimination(baseline: str, optimized: str) -> Annotation | 
     in fewer instructions — the -O0 build of `a + b` spends six instructions
     going through memory where -O2 spends one lea, and none of that is dead.
     Same trade the other detectors make: the count says something went, not
-    why. Cross-referencing gcc's own pass output settles it, which is what
-    Phase 5 is for.
-
-    Takes the asm for one function at each level, low first.
+    why. Reading what gcc reports for itself under -fopt-info would settle it,
+    which is the next thing worth doing here.
     """
     if not baseline.strip() or not optimized.strip():
         # a missing side isn't a shrunken function, it's the function being
@@ -718,10 +773,8 @@ def detect_loop_unrolling(baseline: str, optimized: str) -> Annotation | None:
     Only fully unrolled loops, then. Partial unrolling — four copies per trip
     with the loop still going round — keeps its backwards jump and reads as
     an ordinary loop here. Catching those means knowing how many copies the
-    baseline had per trip, which the two bodies don't say; gcc's own pass
-    output does, and that's what Phase 5 is about.
-
-    Takes the asm for one function at each level, low first.
+    baseline had per trip, which the two bodies don't say; gcc says it under
+    -fopt-info-loop, which is the way in if this needs to get smarter.
     """
     if not baseline.strip() or not optimized.strip():
         return None
@@ -835,8 +888,6 @@ def detect_tail_call(asm: str) -> Annotation | None:
     A function that tail-calls itself is the case this misses. That one comes
     out as a jump to a label just inside the same function, which is a loop by
     the time it's asm and reads as one — `has_loop_branch` is what finds it.
-
-    Takes the asm for a single function, same as the other detectors.
     """
     line = tail_jump_line(asm)
     if line is None:
@@ -938,10 +989,8 @@ def detect_inlining(baseline: str, optimized: str) -> Annotation | None:
 
     The annotation covers the whole optimized body rather than a line, because
     the copied instructions are spread through it with nothing separating them
-    from the caller's own. Phase 5 is where that gets narrowed down — gcc names
-    the callee and the line it inlined it into, and we don't have to guess.
-
-    Takes the asm for one function at each level, low first.
+    from the caller's own. Narrowing that down means asking gcc: -fopt-info-inline
+    names the callee and the line it was inlined into, so nothing is guessed.
     """
     if not baseline.strip() or not optimized.strip():
         return None
@@ -957,21 +1006,415 @@ def detect_inlining(baseline: str, optimized: str) -> Annotation | None:
     return Annotation(INLINING, start, end, INLINING_DESCRIPTION)
 
 
-def run_annotate(path: Path) -> None:
-    """Entry point for `compopt annotate`.
+def _is_conditional_jump(mnemonic: str) -> bool:
+    """True for a jump that asks a question before it goes.
 
-    Eventually this compiles the file and points out the optimizations the
-    compiler applied, one Annotation per thing it spotted. Right now it only
-    checks the file and says what it's going to do, so the detectors get
-    added to a command that already exists and is wired into the CLI.
+    Everything starting with a j is a jump and only `jmp` goes every time, so
+    the two spellings of that one come out and the rest are conditional. The
+    counting jumps belong here too: `loop` decrements rcx and only jumps while
+    it's non-zero, which is a condition however it's spelled.
     """
+    if mnemonic in COUNTING_JUMPS:
+        return True
+    return mnemonic.startswith(JUMP_PREFIX) and mnemonic not in UNCONDITIONAL_JUMPS
+
+
+def has_conditional_branch(asm: str) -> bool:
+    """True when anything in the body decides where to go next."""
+    for line in asm.splitlines():
+        parsed = _parse_instruction(line)
+        if parsed is None:
+            continue
+        if _is_conditional_jump(parsed[0]):
+            return True
+    return False
+
+
+def _counts_instructions(asm: str, wanted: frozenset[str]) -> int:
+    """How many instructions in the body have a stem in `wanted`."""
+    total = 0
+    for line in asm.splitlines():
+        parsed = _parse_instruction(line)
+        if parsed is not None and _stem(parsed[0]) in wanted:
+            total += 1
+    return total
+
+
+def detect_strength_reduction(baseline: str, optimized: str) -> Annotation | None:
+    """Spot a multiply or divide the compiler swapped for something cheaper.
+
+    A multiply costs several cycles and a divide costs tens of them, while a
+    shift costs one. When the operand is a power of two the compiler doesn't
+    need the expensive instruction at all: `x * 8` is `x << 3`, and `x / 4` on
+    an unsigned value is `x >> 2`. Multiplying by a nearby constant goes the
+    same way — `x * 5` comes out as an lea adding x to itself shifted twice.
+
+    Two bodies, because a shift on its own says nothing: `x << 3` is something
+    C can say directly, and code that was written that way looks identical to
+    code that was reduced into it. What makes it the compiler's doing is a
+    multiply or divide that was in the -O0 build and isn't here any more.
+
+    The cheap instructions have to have actually turned up, which is what
+    separates this from the multiply simply being deleted — that's dead code,
+    and `detect_dead_code_elimination` is the one that reports it.
+
+    In practice this fires less often than you'd expect, and the reason is
+    worth knowing: clang does the easy reductions while it's choosing
+    instructions rather than while it's optimizing, so `x * 8` is already a
+    shift at -O0 and there was never a multiply for us to see go. What's left
+    to catch is the kind that needs real analysis — a multiply inside a loop
+    turned into an add carried between trips — which happens at -O1 and above
+    where the baseline genuinely has the expensive instruction in it.
+    """
+    if not baseline.strip() or not optimized.strip():
+        return None
+
+    before = _counts_instructions(baseline, EXPENSIVE_STEMS)
+    after = _counts_instructions(optimized, EXPENSIVE_STEMS)
+    if before == 0 or after >= before:
+        return None
+
+    if _counts_instructions(optimized, CHEAP_STEMS) == 0:
+        return None
+
+    span = _instruction_line_range(optimized)
+    if span is None:
+        return None
+
+    start, end = span
+    return Annotation(STRENGTH_REDUCTION, start, end, STRENGTH_REDUCTION_DESCRIPTION)
+
+
+def detect_branch_elimination(baseline: str, optimized: str) -> Annotation | None:
+    """Spot a decision the compiler worked out so the branch didn't have to.
+
+    A branch that the processor guesses wrong costs more than the work on
+    either side of it, so the compiler would rather not have one. Sometimes it
+    can prove which way the condition goes and keeps only that arm. Other times
+    it runs both sides and picks the answer at the end with a conditional move,
+    which has no branch in it at all — `a > b ? a : b` becomes a compare and a
+    `cmovg` rather than a jump over the arm not taken.
+
+    Two bodies again. A body with no branches in it usually never had any, and
+    the -O0 build is the only thing that says otherwise.
+
+    A loop that got unrolled also loses its branch, and this would report that
+    as well if it were asked, so `detect_loop_unrolling` is checked first and
+    the ordering in `PAIRED_DETECTORS` is what keeps them apart.
+    """
+    if not baseline.strip() or not optimized.strip():
+        return None
+
+    if not has_conditional_branch(baseline) or has_conditional_branch(optimized):
+        return None
+
+    span = _instruction_line_range(optimized)
+    if span is None:
+        return None
+
+    start, end = span
+    return Annotation(BRANCH_ELIMINATION, start, end, BRANCH_ELIMINATION_DESCRIPTION)
+
+
+def _is_vector_instruction(mnemonic: str, operands: list[str]) -> bool:
+    """True for an instruction working on several values at once.
+
+    The register isn't enough on its own. Scalar floating point lives in the
+    same xmm registers that vector code uses — `addss` adds one float and
+    `addps` adds four — so a body doing ordinary `double` arithmetic would read
+    as vectorized if naming an xmm register were the test.
+
+    What separates them is the suffix: `ps` and `pd` are packed, `ss` and `sd`
+    are scalar. Integer vector work is marked differently again, with a `p` on
+    the front (`paddd`, `pmulld`), and the moves that load a whole register at
+    a time (`movaps`, `movdqu`) are packed by definition.
+    """
+    if any(operand.startswith(VECTOR_REGISTERS) for operand in operands):
+        if mnemonic.endswith(SCALAR_SUFFIXES):
+            return False
+        if mnemonic.endswith(PACKED_SUFFIXES) or mnemonic.startswith(PACKED_PREFIX):
+            return True
+    return False
+
+
+def vector_line_range(asm: str) -> tuple[int, int] | None:
+    """First and last line doing vector work, or None when there is none."""
+    first = None
+    last = None
+    for number, line in enumerate(asm.splitlines(), start=1):
+        parsed = _parse_instruction(line)
+        if parsed is None:
+            continue
+        if _is_vector_instruction(*parsed):
+            if first is None:
+                first = number
+            last = number
+    if first is None or last is None:
+        return None
+    return first, last
+
+
+def detect_vectorization(asm: str) -> Annotation | None:
+    """Spot a loop the compiler rewrote to work on several values at a time.
+
+    The registers are wide enough to hold more than one number — an xmm holds
+    four ints, a ymm holds eight — and there are instructions that operate on
+    all of them at once. So a loop adding up an array doesn't have to go round
+    once per element; the compiler can have it do four or eight per trip and
+    add the pieces together at the end.
+
+    One body is enough, which most of the two-body detectors can't say. C has
+    no way to ask for a packed add, so a packed instruction in the output is
+    always something the compiler decided, never something that was written.
+
+    What this can't tell you is how wide the vectorization went or how much of
+    the loop it covered — that needs the compiler's own account of it, which
+    gcc gives under -fopt-info-vec.
+    """
+    span = vector_line_range(asm)
+    if span is None:
+        return None
+
+    start, end = span
+    return Annotation(VECTORIZATION, start, end, VECTORIZATION_DESCRIPTION)
+
+
+# the detectors that can work off the optimized body on its own, because the
+# thing they look for is visible in it — a prologue that isn't there, a literal
+# where a calculation used to be.
+SINGLE_BODY_DETECTORS = (
+    detect_frame_elimination,
+    detect_constant_folding,
+    detect_register_coalescing,
+    detect_tail_call,
+    detect_vectorization,
+)
+
+# and the ones that have to see -O0 as well, because what they look for is
+# something that stopped being there and absence has no shape of its own.
+#
+# unrolling comes before branch elimination on purpose. both of them fire on a
+# body that lost its jumps, and a loop written out in full is the more specific
+# thing to say about one, so it gets asked first and `_drop_superseded` keeps
+# the other quiet.
+PAIRED_DETECTORS = (
+    detect_dead_code_elimination,
+    detect_loop_unrolling,
+    detect_branch_elimination,
+    detect_strength_reduction,
+    detect_inlining,
+)
+
+
+# a finding that would only be repeating one already made, keyed by the name
+# that wins. unrolling a loop removes its branch, so a body that reports both
+# is describing one thing the compiler did and naming it twice; the specific
+# one is the one worth keeping.
+SUPERSEDED = {LOOP_UNROLLING: BRANCH_ELIMINATION}
+
+
+def _drop_superseded(found: list[Annotation]) -> list[Annotation]:
+    """Take out findings that another finding already accounts for."""
+    names = {note.name for note in found}
+    covered = {SUPERSEDED[name] for name in names if name in SUPERSEDED}
+    return [note for note in found if note.name not in covered]
+
+
+def find_annotations(baseline: str, optimized: str) -> list[Annotation]:
+    """Run every detector over one function and collect what they found.
+
+    Sorted by where they land rather than by the order the detectors happen to
+    be listed in, so the notes come out in the order you meet them reading down
+    the asm. Ties go to the shorter span, which puts the note about a single
+    instruction above the one covering the whole body it sits in.
+
+    Overlapping findings mostly stay, because they do overlap and both are
+    usually true: a body small enough to keep everything in registers has
+    normally lost instructions too, and coalescing and dead code are separate
+    things the compiler did. The exception is a finding that is only another
+    one restated, which `SUPERSEDED` lists and `_drop_superseded` removes.
+    """
+    found = [
+        note
+        for detect in SINGLE_BODY_DETECTORS
+        if (note := detect(optimized)) is not None
+    ]
+    found += [
+        note
+        for detect in PAIRED_DETECTORS
+        if (note := detect(baseline, optimized)) is not None
+    ]
+    return sorted(_drop_superseded(found), key=lambda note: (note.start, note.span, note.name))
+
+
+# every optimization this knows how to name, and what it means. the detectors
+# already carry the description onto each annotation they build; this is the
+# same text reachable by name, so `--explain` can answer for an optimization
+# that wasn't found in the file you happened to point at.
+DESCRIPTIONS = {
+    FRAME_ELIMINATION: FRAME_ELIMINATION_DESCRIPTION,
+    CONSTANT_FOLDING: CONSTANT_FOLDING_DESCRIPTION,
+    REGISTER_COALESCING: REGISTER_COALESCING_DESCRIPTION,
+    DEAD_CODE_ELIMINATION: DEAD_CODE_ELIMINATION_DESCRIPTION,
+    LOOP_UNROLLING: LOOP_UNROLLING_DESCRIPTION,
+    TAIL_CALL: TAIL_CALL_DESCRIPTION,
+    INLINING: INLINING_DESCRIPTION,
+    STRENGTH_REDUCTION: STRENGTH_REDUCTION_DESCRIPTION,
+    BRANCH_ELIMINATION: BRANCH_ELIMINATION_DESCRIPTION,
+    VECTORIZATION: VECTORIZATION_DESCRIPTION,
+}
+
+
+def _normalize_name(name: str) -> str:
+    """A name reduced to the bit that matters for matching it.
+
+    The names have spaces in them, which means quoting them on a command line,
+    so hyphens and underscores are taken as spaces too and `--explain
+    dead-code-elimination` works without the quotes.
+    """
+    return " ".join(name.lower().replace("-", " ").replace("_", " ").split())
+
+
+def match_name(name: str) -> str | None:
+    """The optimization someone meant, spelled the way we spell it.
+
+    An exact name wins. Failing that a unique prefix is enough, so `inlining`
+    and `tail` both land — but a prefix matching two of them comes back as None
+    rather than picking one, since guessing which was meant is worse than
+    saying it was ambiguous.
+    """
+    wanted = _normalize_name(name)
+    for known in DESCRIPTIONS:
+        if _normalize_name(known) == wanted:
+            return known
+
+    hits = [known for known in DESCRIPTIONS if _normalize_name(known).startswith(wanted)]
+    return hits[0] if len(hits) == 1 else None
+
+
+def explain(name: str) -> str | None:
+    """The description of an optimization by name, or None for an unknown one."""
+    known = match_name(name)
+    return None if known is None else DESCRIPTIONS[known]
+
+
+def _report(console: Console, annotations: list[Annotation], quiet: str) -> None:
+    """Print the list of what was found, each with what it means."""
+    if not annotations:
+        # worth saying out loud — an empty notes column looks the same as a
+        # column we forgot to fill in
+        console.print("no optimizations detected", style=quiet)
+        return
+
+    plural = "" if len(annotations) == 1 else "s"
+    console.print(f"\n{len(annotations)} optimization{plural} found:")
+    for note in annotations:
+        console.print(f"  {note.label()}")
+        if note.description:
+            console.print(f"    {note.description}", style=quiet)
+
+
+def _run_explain(console: Console, name: str) -> None:
+    """Answer `--explain <opt>`, or list the names when it doesn't match one."""
+    known = match_name(name)
+    if known is not None:
+        console.print(f"{known}: {DESCRIPTIONS[known]}")
+        return
+
+    typer.echo(f"error: nothing known as {name!r}", err=True)
+    typer.echo(f"known optimizations: {', '.join(DESCRIPTIONS)}", err=True)
+    raise typer.Exit(code=1)
+
+
+def _check_source(path: Path) -> None:
+    """Stop on anything we can't hand to a compiler. A plain line beats a traceback."""
     if not path.exists():
-        # same as show/diff: a plain error line beats a traceback
         typer.echo(f"error: no such file: {path}", err=True)
         raise typer.Exit(code=1)
-
     if not path.is_file():
         typer.echo(f"error: not a file: {path}", err=True)
         raise typer.Exit(code=1)
 
-    typer.echo(f"would annotate the optimizations in {path}")
+
+def _baseline_body(cleaned: dict[str, str], func: str | None) -> str:
+    """The -O0 body of the wanted function, or a clean error naming what's there.
+
+    The baseline is where a name has to exist, because -O0 does what the source
+    said. Anything missing from it was never written rather than optimized out,
+    so a miss here is a typo and gets reported as one.
+    """
+    try:
+        return isolate_function(cleaned[BASELINE_LEVEL], func)
+    except KeyError:
+        names = function_names(cleaned[BASELINE_LEVEL])
+        typer.echo(f"error: no function named {func!r}", err=True)
+        if names:
+            typer.echo(f"available functions: {', '.join(names)}", err=True)
+        raise typer.Exit(code=1) from None
+
+
+def run_annotate(path: Path | None, level: str = "2", func: str | None = None,
+                 summary: bool = False, explain_name: str | None = None,
+                 no_color: bool = False, width: int | None = None,
+                 compiler: str | None = None) -> None:
+    """Entry point for `compopt annotate`.
+
+    Compiles the file at -O0 and at the level asked for, runs every detector
+    over the pair, and prints the optimized asm with what they found beside it
+    and a list underneath. `summary` drops the asm and keeps just the list.
+
+    `explain_name` is the odd one out — it looks up what an optimization means
+    by name and prints that, without compiling anything, so it answers "what is
+    register coalescing" as well as "what happened to this file". That's why
+    the path is optional here.
+
+    Annotating -O0 against itself is allowed and comes back nearly empty, which
+    is the honest answer: the paired detectors are comparing a body with
+    itself, and the single-body ones are looking at code the optimizer hasn't
+    touched.
+
+    The detectors report the shape they see, not what gcc says it did, so some
+    of these are guesses — `detect_constant_folding` can't tell a folded
+    calculation from a constant that was written that way, and
+    `detect_register_coalescing` can't tell a spill that was removed from a
+    function that never had one. Their docstrings say which way each one errs.
+    """
+    console = Console(no_color=no_color, width=width)
+    quiet = "" if no_color else "dim"
+
+    if explain_name is not None:
+        _run_explain(console, explain_name)
+        return
+
+    if path is None:
+        typer.echo("error: a source file is required", err=True)
+        raise typer.Exit(code=1)
+
+    level = normalize_level(level)
+    check_level("--level", level)
+    _check_source(path)
+
+    compiler = choose_compiler(compiler)
+    levels = list(dict.fromkeys([BASELINE_LEVEL, level]))
+    cleaned = {
+        name: strip_directives(text)
+        for name, text in compile_at_levels(path, compiler, levels).items()
+    }
+
+    baseline = _baseline_body(cleaned, func)
+    if not baseline.strip():
+        console.print(f"no functions to annotate in {path}", style=quiet)
+        return
+
+    # empty on the optimized side is a finding, not a mistake: the name was in
+    # the baseline, so something the compiler did made it stop being anywhere
+    optimized = find_function(cleaned[level], func)
+    if not optimized.strip():
+        console.print(f"the function is gone at -O{level} (inlined or optimized away)",
+                      style=quiet)
+        return
+
+    annotations = find_annotations(baseline, optimized)
+    if not summary:
+        console.print(render_annotated(f"-O{level}", optimized, annotations, color=not no_color))
+    _report(console, annotations, quiet)
