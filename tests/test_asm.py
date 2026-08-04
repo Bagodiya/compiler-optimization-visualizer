@@ -111,3 +111,61 @@ def test_find_function_gives_empty_instead_of_raising() -> None:
 
 def test_find_function_still_defaults_to_the_first_one() -> None:
     assert find_function(TWO_FUNCS).startswith("add:")
+
+
+# Mach-O local labels sit at column 0, which is where a function label goes too
+
+MACHO = """_sum:                                   ## @sum
+## %bb.0:
+\ttestl\t%edi, %edi
+\tjle\tLBB0_1
+\tmovl\t%edi, %eax
+\tretq
+LBB0_1:
+\txorl\t%eax, %eax
+\tretq
+"""
+
+
+def test_clang_local_labels_are_not_functions() -> None:
+    assert function_names(MACHO) == ["_sum"]
+
+
+def test_a_function_is_not_cut_off_at_its_own_local_label() -> None:
+    # isolate_function stops at the next function label, so counting LBB0_1 as
+    # one would drop the whole branch that follows it
+    body = isolate_function(MACHO)
+    assert "LBB0_1:" in body
+    assert body.strip().endswith("retq")
+    assert len(body.splitlines()) == len(MACHO.rstrip().splitlines())
+
+
+
+def test_the_other_mach_o_labels_are_skipped_too() -> None:
+    # constant pools, jump tables, temporaries, string literals, and the
+    # frame markers GNU gcc wraps every function in
+    asm = ("_f:\n\tretq\nLCPI0_0:\nLJTI0_0:\nLtmp3:\nL_.str:\n"
+           "LFB0:\nLFE0:\nEH_frame1:\n")
+    assert function_names(asm) == ["_f"]
+
+
+def test_gnu_gcc_frame_labels_do_not_end_a_function() -> None:
+    # GNU gcc targeting Darwin brackets each function with LFB0/LFE0, and the
+    # body sits between them — stopping at LFB0 would leave nothing at all
+    asm = "_add:\nLFB0:\n\tleal\t(%rdi,%rsi), %eax\n\tret\nLFE0:\n"
+    body = isolate_function(asm)
+    assert "leal" in body
+    assert "ret" in body
+
+
+def test_a_function_can_still_start_with_an_l_on_elf() -> None:
+    # on ELF a leading L means nothing special, so a real function named this
+    # way has to survive
+    assert function_names("Lookup:\n\tret\n") == ["Lookup"]
+
+
+def test_elf_is_not_mistaken_for_mach_o_by_one_underscore() -> None:
+    # a Linux build can have an underscored symbol in it without that making
+    # every other function invisible
+    elf = "_start:\n\tret\nmain:\n.L2:\n\tret\n"
+    assert function_names(elf) == ["_start", "main"]
