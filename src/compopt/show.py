@@ -1,50 +1,18 @@
 """The show command — compiles a source file and prints its assembly."""
 
-import os
 from pathlib import Path
 
 import typer
 from rich.console import Console
 
 from compopt.asm import function_names, isolate_function, strip_directives
-from compopt.compilers import compile_at_levels, find_compilers
+from compopt.compilers import choose_compiler, compile_at_levels
 from compopt.render import levels_for_width, render_columns
 
 
 def _function_body(asm: str, func: str | None) -> str:
     """Clean one level's assembly and pull out the function we want from it."""
     return isolate_function(strip_directives(asm), func)
-
-
-def _pick_compiler(requested: str | None, available: list[str]) -> str:
-    """Work out which compiler to actually run.
-
-    An explicit --compiler wins but has to really be installed, otherwise
-    we stop. With no flag we look at $CC the same way make and configure do,
-    so `CC=clang compopt show foo.c` just works. $CC can be a bare name or a
-    full path like /usr/bin/clang, so we compare on the file name. Anything
-    we can't drive (say CC=cc) is ignored with a warning and we fall back to
-    gcc-first.
-    """
-    if requested is not None:
-        if requested not in available:
-            typer.echo(f"error: {requested} is not available on PATH", err=True)
-            typer.echo(f"available: {', '.join(available)}", err=True)
-            raise typer.Exit(code=1)
-        return requested
-
-    env_cc = os.environ.get("CC")
-    if env_cc:
-        name = Path(env_cc).name
-        if name in available:
-            return name
-        typer.echo(
-            f"warning: ignoring $CC={env_cc}, not one of: {', '.join(available)}",
-            err=True,
-        )
-
-    # gcc first if it's around, otherwise whatever we found
-    return available[0]
 
 
 def run_show(
@@ -76,12 +44,7 @@ def run_show(
         typer.echo(f"error: not a file: {path}", err=True)
         raise typer.Exit(code=1)
 
-    compilers = find_compilers()
-    if not compilers:
-        typer.echo("error: could not find gcc or clang on PATH", err=True)
-        raise typer.Exit(code=1)
-
-    compiler = _pick_compiler(compiler, compilers)
+    compiler = choose_compiler(compiler)
 
     asm = compile_at_levels(path, compiler)
 

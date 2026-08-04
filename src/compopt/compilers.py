@@ -1,10 +1,13 @@
 """Figuring out which compilers we can actually use on this machine."""
 
+import os
 import shutil
 import subprocess
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+
+import typer
 
 # the ones we know how to drive for now
 KNOWN_COMPILERS = ["gcc", "clang"]
@@ -37,6 +40,83 @@ def find_compilers() -> list[str]:
         if shutil.which(name) is not None:
             found.append(name)
     return found
+
+
+def normalize_level(level: str) -> str:
+    """Take a level however the user spelled it and give back the bare digit.
+
+    Everything inside passes levels around as `"0"`..`"3"` and only sticks the
+    `-O` on at display time, but nobody thinks of them that way — the flag you
+    have in your head is `-O2`, so that's what gets typed. Accepting `2`, `O2`
+    and `-O2` costs three calls and saves the reader from a rejection that
+    looks like the tool doesn't know its own levels.
+
+    A spelling we don't recognise is passed through untouched rather than
+    patched up, so `--to fast` still reaches `check_level` and gets reported
+    against the list of levels instead of quietly becoming something else.
+    """
+    return level.removeprefix("-").removeprefix("O").removeprefix("o") or level
+
+
+def check_level(flag: str, level: str) -> None:
+    """Stop early if a level isn't one we know how to compile.
+
+    Only the digits in DEFAULT_LEVELS are valid, so `--from 9` is caught here
+    instead of turning into a `-O9` the compiler would reject. `flag` names the
+    option it came from, since the message is no use if you passed two of them
+    and can't tell which one it's complaining about.
+    """
+    if level not in DEFAULT_LEVELS:
+        typer.echo(f"error: {flag} must be one of: {', '.join(DEFAULT_LEVELS)}", err=True)
+        raise typer.Exit(code=1)
+
+
+def pick_compiler(requested: str | None, available: list[str]) -> str:
+    """Work out which compiler to actually run.
+
+    An explicit --compiler wins but has to really be installed, otherwise
+    we stop. With no flag we look at $CC the same way make and configure do,
+    so `CC=clang compopt show foo.c` just works. $CC can be a bare name or a
+    full path like /usr/bin/clang, so we compare on the file name. Anything
+    we can't drive (say CC=cc) is ignored with a warning and we fall back to
+    gcc-first.
+
+    Takes the available list rather than calling `find_compilers` itself, so
+    the choosing can be tested without a toolchain installed.
+    """
+    if requested is not None:
+        if requested not in available:
+            typer.echo(f"error: {requested} is not available on PATH", err=True)
+            typer.echo(f"available: {', '.join(available)}", err=True)
+            raise typer.Exit(code=1)
+        return requested
+
+    env_cc = os.environ.get("CC")
+    if env_cc:
+        name = Path(env_cc).name
+        if name in available:
+            return name
+        typer.echo(
+            f"warning: ignoring $CC={env_cc}, not one of: {', '.join(available)}",
+            err=True,
+        )
+
+    # gcc first if it's around, otherwise whatever we found
+    return available[0]
+
+
+def choose_compiler(requested: str | None) -> str:
+    """Find what's installed and settle on one, or stop if there's nothing.
+
+    Every command opens the same way — look at the machine, then honour
+    whatever the user asked for — so the two steps live together here rather
+    than being spelled out three times over.
+    """
+    available = find_compilers()
+    if not available:
+        typer.echo("error: could not find gcc or clang on PATH", err=True)
+        raise typer.Exit(code=1)
+    return pick_compiler(requested, available)
 
 
 def compile_to_asm(source: Path, level: str, compiler: str) -> str:
