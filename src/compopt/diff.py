@@ -1,18 +1,20 @@
-"""The diff command — compare the assembly of two optimization levels.
-
-The command wiring is still the skeleton: it checks the source file and
-reports which two levels it will compare. The rendering comes later, but
-the line-diffing engine that feeds it lives here now (`diff_lines`).
-"""
+"""The diff command — compare the assembly of two optimization levels."""
 
 from difflib import SequenceMatcher
 from difflib import unified_diff as _unified_diff
 from pathlib import Path
 
 import typer
+from rich.console import Console
 from rich.text import Text
 
-from compopt.compilers import DEFAULT_LEVELS
+from compopt.asm import find_function, strip_directives
+from compopt.compilers import (
+    check_level,
+    choose_compiler,
+    compile_at_levels,
+    normalize_level,
+)
 
 # the character we put in front of each line to say what happened to it,
 # same idea as a normal `diff`/`git diff` gutter. "gap" is our stand-in for a
@@ -220,17 +222,6 @@ def unified_diff(old: str, new: str, from_label: str = "O0", to_label: str = "O2
     return "\n".join(lines)
 
 
-def _check_level(flag: str, level: str) -> None:
-    """Stop early if a level isn't one we know how to compile.
-
-    Only the digits in DEFAULT_LEVELS are valid, so `--from 9` is caught
-    here instead of turning into a `-O9` the compiler would reject.
-    """
-    if level not in DEFAULT_LEVELS:
-        typer.echo(f"error: {flag} must be one of: {', '.join(DEFAULT_LEVELS)}", err=True)
-        raise typer.Exit(code=1)
-
-
 def _check_context(context: int) -> None:
     """Reject a negative --context before we get any further.
 
@@ -243,24 +234,28 @@ def _check_context(context: int) -> None:
 
 
 def run_diff(path: Path, from_level: str = "0", to_level: str = "2", context: int = 3,
-             unified: bool = False) -> None:
+             unified: bool = False, func: str | None = None, no_color: bool = False,
+             width: int | None = None, compiler: str | None = None) -> None:
     """Entry point for `compopt diff`.
 
-    Eventually this compiles the file and shows what changed in the asm
-    going from one -O level to another. Right now it only validates the
-    input and prints what it's going to do, so the rest of the command
-    can be built on top of a command that already exists and is wired in.
+    Compiles the file at the two levels asked for, pulls the same function out
+    of each, and shows what changed between them. The levels default to -O0
+    against -O2 since that's the pair with the biggest change in it.
 
-    The two levels are the bare digits ("0", "2"), and default to comparing
-    -O0 against -O2 since that's the pair that shows the biggest change.
-    `context` is how many unchanged lines to keep around each change once the
-    real rendering is wired up (see `trim_context`). When `unified` is set the
-    output uses the portable `diff -u` format (see `unified_diff`) instead of
-    our colored +/- view.
+    A function that isn't in one of the two builds doesn't get diffed — that's
+    the inlining case and `missing_message` says so in a line instead of
+    marking the whole body as deleted. `context` trims the unchanged lines
+    down to a few either side of each change, and `unified` swaps our colored
+    +/- view for the portable `diff -u` format.
+
+    Unlike `show` this compiles two levels rather than all four, since the
+    other two would be work nobody asked to see.
     """
     # check the flags before touching the disk, they're cheap to get wrong
-    _check_level("--from", from_level)
-    _check_level("--to", to_level)
+    from_level = normalize_level(from_level)
+    to_level = normalize_level(to_level)
+    check_level("--from", from_level)
+    check_level("--to", to_level)
     _check_context(context)
 
     if not path.exists():
@@ -271,10 +266,36 @@ def run_diff(path: Path, from_level: str = "0", to_level: str = "2", context: in
         typer.echo(f"error: not a file: {path}", err=True)
         raise typer.Exit(code=1)
 
-    message = (
-        f"would diff -O{from_level} against -O{to_level} for {path} "
-        f"with {context} lines of context"
-    )
+    compiler = choose_compiler(compiler)
+
+    # the same level twice is one compile, not two — asking for it is a fair
+    # way to check the tool agrees a level matches itself
+    levels = list(dict.fromkeys([from_level, to_level]))
+    asm = compile_at_levels(path, compiler, levels)
+
+    old = find_function(strip_directives(asm[from_level]), func)
+    new = find_function(strip_directives(asm[to_level]), func)
+
+    console = Console(no_color=no_color, width=width)
+
+    note = missing_message(old, new, from_level, to_level)
+    if note is not None:
+        console.print(note, style="" if no_color else "dim")
+        return
+
+    # soft_wrap because a diff line means the instruction it came from. folding
+    # a long one onto a second row puts text under the +/- gutter that has no
+    # marker of its own, which reads as a line that changed for free; letting
+    # it run off the edge is what `diff` and `git diff` do
     if unified:
-        message += ", in unified format"
-    typer.echo(message)
+        console.print(unified_diff(old, new, f"O{from_level}", f"O{to_level}", context),
+                      soft_wrap=True)
+        return
+
+    changes = diff_lines(old, new)
+    # trimming turns a run of unchanged lines into a "gap" entry, which stops
+    # `is_identical` recognising a body that didn't change at all, so the
+    # question gets asked while the diff is still whole
+    if not is_identical(changes):
+        changes = trim_context(changes, context)
+    console.print(highlight_diff(changes, color=not no_color), soft_wrap=True)

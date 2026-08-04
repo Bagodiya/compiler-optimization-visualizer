@@ -1,16 +1,19 @@
 """Tests for the diff command and its line-diffing engine.
 
-The command itself is still a skeleton, so those tests just check it
-validates its input and reports the levels it will compare. The
-`diff_lines` tests below exercise the real diffing logic that the
-rendering step will sit on top of.
+Most of this exercises the diffing and rendering pieces on hand-written asm,
+where the expected output can be spelled out. The handful at the bottom drive
+the command itself against a real compiler, so they only check the shape of
+what comes back — the exact instructions are the compiler's business and
+change between versions.
 """
 
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 from compopt.cli import app
+from compopt.compilers import find_compilers
 from compopt.diff import (
     IDENTICAL_MESSAGE,
     NEITHER_MESSAGE,
@@ -24,6 +27,13 @@ from compopt.diff import (
 )
 
 runner = CliRunner()
+
+# the end-to-end ones need a real toolchain to produce anything to diff
+needs_compiler = pytest.mark.skipif(
+    not find_compilers(), reason="no gcc or clang available"
+)
+
+SOURCE = "int add(int a, int b) { return a + b; }\n"
 
 
 def _styles(text) -> set[str]:
@@ -268,27 +278,6 @@ def test_unified_diff_respects_context() -> None:
     assert "line 0" not in text
 
 
-def test_diff_reports_levels(tmp_path: Path) -> None:
-    src = tmp_path / "hello.c"
-    src.write_text("int add(int a, int b) { return a + b; }\n")
-
-    result = runner.invoke(app, ["diff", str(src)])
-    assert result.exit_code == 0
-    # the placeholder should name the two levels it's going to compare
-    assert "-O0" in result.stdout
-    assert "-O2" in result.stdout
-
-
-def test_diff_uses_the_levels_it_was_given(tmp_path: Path) -> None:
-    src = tmp_path / "hello.c"
-    src.write_text("int add(int a, int b) { return a + b; }\n")
-
-    result = runner.invoke(app, ["diff", str(src), "--from", "1", "--to", "3"])
-    assert result.exit_code == 0
-    assert "-O1" in result.stdout
-    assert "-O3" in result.stdout
-    # the defaults shouldn't leak through once the flags are set
-    assert "-O0" not in result.stdout
 
 
 def test_diff_rejects_a_level_we_cant_compile(tmp_path: Path) -> None:
@@ -308,22 +297,6 @@ def test_diff_rejects_a_bad_to_level(tmp_path: Path) -> None:
     assert result.exit_code == 1
 
 
-def test_diff_reports_the_context_it_will_use(tmp_path: Path) -> None:
-    src = tmp_path / "hello.c"
-    src.write_text("int add(int a, int b) { return a + b; }\n")
-
-    result = runner.invoke(app, ["diff", str(src), "--context", "5"])
-    assert result.exit_code == 0
-    assert "5 lines of context" in result.stdout
-
-
-def test_diff_reports_unified_mode(tmp_path: Path) -> None:
-    src = tmp_path / "hello.c"
-    src.write_text("int add(int a, int b) { return a + b; }\n")
-
-    result = runner.invoke(app, ["diff", str(src), "--unified"])
-    assert result.exit_code == 0
-    assert "unified" in result.stdout
 
 
 def test_diff_rejects_negative_context(tmp_path: Path) -> None:
@@ -419,34 +392,7 @@ def test_unified_diff_from_empty_side() -> None:
     assert "+ret" in text
 
 
-def test_diff_accepts_the_same_level_twice(tmp_path: Path) -> None:
-    src = tmp_path / "hello.c"
-    src.write_text("int add(int a, int b) { return a + b; }\n")
 
-    # comparing a level against itself is pointless but not an error
-    result = runner.invoke(app, ["diff", str(src), "--from", "2", "--to", "2"])
-    assert result.exit_code == 0
-    assert "-O2 against -O2" in result.stdout
-
-
-def test_diff_accepts_zero_context(tmp_path: Path) -> None:
-    src = tmp_path / "hello.c"
-    src.write_text("int add(int a, int b) { return a + b; }\n")
-
-    # zero means "changed lines only", which is different from a negative count
-    result = runner.invoke(app, ["diff", str(src), "--context", "0"])
-    assert result.exit_code == 0
-    assert "0 lines of context" in result.stdout
-
-
-def test_diff_short_flags_work_the_same(tmp_path: Path) -> None:
-    src = tmp_path / "hello.c"
-    src.write_text("int add(int a, int b) { return a + b; }\n")
-
-    result = runner.invoke(app, ["diff", str(src), "-C", "5", "-u"])
-    assert result.exit_code == 0
-    assert "5 lines of context" in result.stdout
-    assert "unified" in result.stdout
 
 
 def test_missing_message_none_when_both_sides_have_code() -> None:
@@ -484,11 +430,106 @@ def test_missing_message_beats_the_all_removed_diff() -> None:
     assert missing_message(old, "") is not None
 
 
-def test_diff_without_unified_says_nothing_about_it(tmp_path: Path) -> None:
+# from here down the command is driven for real, so these need a compiler
+
+@needs_compiler
+def test_diff_marks_lines_that_went_and_arrived(tmp_path: Path) -> None:
     src = tmp_path / "hello.c"
-    src.write_text("int add(int a, int b) { return a + b; }\n")
+    src.write_text(SOURCE)
+
+    result = runner.invoke(app, ["diff", str(src), "--no-color", "--width", "200"])
+    assert result.exit_code == 0
+    lines = result.stdout.splitlines()
+    # -O0 puts both arguments in memory and reads them back, -O2 doesn't, so
+    # there is always something leaving and something arriving between the two
+    assert any(line.startswith("-") for line in lines)
+    assert any(line.startswith("+") for line in lines)
+
+
+@needs_compiler
+def test_diff_of_a_level_against_itself_says_so(tmp_path: Path) -> None:
+    src = tmp_path / "hello.c"
+    src.write_text(SOURCE)
+
+    # pointless but not an error, and it should not print the body back
+    result = runner.invoke(app, ["diff", str(src), "--from", "2", "--to", "2",
+                                 "--no-color", "--width", "200"])
+    assert result.exit_code == 0
+    assert IDENTICAL_MESSAGE in result.stdout
+
+
+@needs_compiler
+def test_diff_accepts_the_o_spelling(tmp_path: Path) -> None:
+    src = tmp_path / "hello.c"
+    src.write_text(SOURCE)
+
+    # --from O0 is how the level is spelled everywhere else, so it has to work
+    spelled = runner.invoke(app, ["diff", str(src), "--from", "O0", "--to", "O2",
+                                  "--no-color", "--width", "200"])
+    bare = runner.invoke(app, ["diff", str(src), "--from", "0", "--to", "2",
+                               "--no-color", "--width", "200"])
+    assert spelled.exit_code == 0
+    assert spelled.stdout == bare.stdout
+
+
+@needs_compiler
+def test_diff_unified_has_the_usual_header(tmp_path: Path) -> None:
+    src = tmp_path / "hello.c"
+    src.write_text(SOURCE)
+
+    result = runner.invoke(app, ["diff", str(src), "-u", "--no-color", "--width", "200"])
+    assert result.exit_code == 0
+    assert "--- O0" in result.stdout
+    assert "+++ O2" in result.stdout
+
+
+@needs_compiler
+def test_diff_context_controls_how_much_is_kept(tmp_path: Path) -> None:
+    src = tmp_path / "loop.c"
+    # something long enough that there are unchanged lines worth folding away
+    src.write_text(
+        "int sum(int n) { int t = 0; for (int i = 0; i < n; i++) t += i; return t; }\n"
+    )
+
+    tight = runner.invoke(app, ["diff", str(src), "-C", "0", "--no-color", "--width", "200"])
+    loose = runner.invoke(app, ["diff", str(src), "-C", "9", "--no-color", "--width", "200"])
+    assert tight.exit_code == 0
+    assert loose.exit_code == 0
+    # more context can only ever mean more lines on screen
+    assert len(tight.stdout.splitlines()) <= len(loose.stdout.splitlines())
+
+
+@needs_compiler
+def test_diff_func_picks_the_function(tmp_path: Path) -> None:
+    src = tmp_path / "two.c"
+    src.write_text(
+        "int add(int a, int b) { return a + b; }\n"
+        "int sub(int a, int b) { return a - b; }\n"
+    )
+
+    result = runner.invoke(app, ["diff", str(src), "--func", "sub",
+                                 "--no-color", "--width", "200"])
+    assert result.exit_code == 0
+    assert "sub" in result.stdout
+    # asking for sub shouldn't drag add's body into the diff
+    assert "add:" not in result.stdout
+
+
+@needs_compiler
+def test_diff_of_a_function_that_is_in_neither_level(tmp_path: Path) -> None:
+    src = tmp_path / "hello.c"
+    src.write_text(SOURCE)
+
+    # a typo'd name is in neither build, which is the one message that covers it
+    result = runner.invoke(app, ["diff", str(src), "--func", "nope", "--no-color"])
+    assert result.exit_code == 0
+    assert NEITHER_MESSAGE in result.stdout
+
+
+@needs_compiler
+def test_diff_bad_source_reports_the_compiler(tmp_path: Path) -> None:
+    src = tmp_path / "broken.c"
+    src.write_text("int main(void) { return }\n")
 
     result = runner.invoke(app, ["diff", str(src)])
-    # can't just search for "unified" — tmp_path is named after the test, so
-    # the word is already sitting in the path we printed
-    assert not result.stdout.strip().endswith("in unified format")
+    assert result.exit_code == 1

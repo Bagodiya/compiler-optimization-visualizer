@@ -100,9 +100,30 @@ def diff(
         bool,
         typer.Option("--unified", "-u", help="Emit a standard unified diff (diff -u format)."),
     ] = False,
+    func: Annotated[
+        str | None,
+        typer.Option("--func", "-f", help="Which function to compare."),
+    ] = None,
+    no_color: Annotated[
+        bool,
+        typer.Option("--no-color", help="Disable color in the output."),
+    ] = False,
+    width: Annotated[
+        int | None,
+        typer.Option("--width", help="Force the output width instead of measuring the terminal."),
+    ] = None,
+    compiler: Annotated[
+        str | None,
+        typer.Option("--compiler", "-c", help="Which compiler to use: gcc or clang."),
+    ] = None,
 ) -> None:
     """Show what changed in the asm between two optimization levels."""
-    run_diff(path, from_level, to_level, context, unified)
+    try:
+        run_diff(path, from_level, to_level, context, unified, func, no_color, width, compiler)
+    except CompileError as err:
+        typer.echo(f"error: {err.compiler} could not compile {path}", err=True)
+        typer.echo(err.message, err=True)
+        raise typer.Exit(code=1) from err
 
 
 @app.command()
