@@ -6,13 +6,17 @@ we just feed them assembly text and check what comes back out.
 
 from rich.console import Console
 
+from compopt.annotate import Annotation
 from compopt.render import (
     ALL_LEVELS,
     MIN_COLUMN_WIDTH,
     NARROW_LEVELS,
+    SPAN_MARKER,
+    annotation_gutter,
     highlight_asm,
     levels_for_width,
     line_number_gutter,
+    render_annotated,
     render_columns,
 )
 
@@ -223,3 +227,77 @@ def test_render_columns_no_color_has_no_styled_cells() -> None:
     body = next(iter(table.columns[1].cells))
     assert not gutter.spans
     assert not body.spans
+
+
+# the notes that run down the right of an annotated body
+
+def _gutter_lines(text) -> list[str]:
+    # split rather than splitlines: a note-less last line is an empty string
+    # that splitlines would drop, and its being there is the thing under test
+    return text.plain.split("\n")
+
+
+BODY = "add:\n\tpushq\t%rbp\n\tmovq\t%rsp, %rbp\n\tpopq\t%rbp\n\tret\n"
+
+
+def test_annotation_gutter_is_as_long_as_the_body() -> None:
+    # it shares a table cell with the asm, so it has to have the same number
+    # of lines or the notes stop pointing at the right instructions
+    gutter = annotation_gutter([Annotation("inlining", 2, 3)], 5)
+    assert len(_gutter_lines(gutter)) == 5
+
+
+def test_annotation_gutter_names_it_on_the_starting_line() -> None:
+    gutter = annotation_gutter([Annotation("inlining", 2, 4)], 5)
+    lines = _gutter_lines(gutter)
+    assert lines[0] == ""
+    assert lines[1] == "inlining"
+
+
+def test_annotation_gutter_marks_the_rest_of_the_span() -> None:
+    gutter = annotation_gutter([Annotation("inlining", 2, 4)], 5)
+    lines = _gutter_lines(gutter)
+    # the name goes on line 2, so lines 3 and 4 only say it hasn't finished
+    assert lines[2] == SPAN_MARKER
+    assert lines[3] == SPAN_MARKER
+    assert lines[4] == ""
+
+
+def test_annotation_gutter_joins_two_starting_together() -> None:
+    # a body that fits in registers has usually lost instructions too, so
+    # these two land on the same line more often than not
+    gutter = annotation_gutter(
+        [Annotation("register coalescing", 2, 4), Annotation("dead code elimination", 2, 4)],
+        5,
+    )
+    assert _gutter_lines(gutter)[1] == "register coalescing, dead code elimination"
+
+
+def test_annotation_gutter_with_nothing_found() -> None:
+    gutter = annotation_gutter([], 3)
+    assert _gutter_lines(gutter) == ["", "", ""]
+
+
+def test_annotation_gutter_no_color_carries_no_style() -> None:
+    gutter = annotation_gutter([Annotation("inlining", 1, 2)], 3, color=False)
+    assert all(str(span.style) == "" for span in gutter.spans)
+
+
+def test_render_annotated_shows_the_asm_and_the_note() -> None:
+    table = render_annotated("-O2", BODY, [Annotation("inlining", 2, 2)])
+    text = _render_to_text(table)
+    assert "-O2" in text
+    assert "pushq" in text
+    assert "inlining" in text
+
+
+def test_render_annotated_numbers_every_line() -> None:
+    table = render_annotated("-O2", BODY, [])
+    text = _render_to_text(table)
+    for number in range(1, len(BODY.splitlines()) + 1):
+        assert str(number) in text
+
+
+def test_render_annotated_with_no_annotations_still_renders() -> None:
+    text = _render_to_text(render_annotated("-O0", BODY, []))
+    assert "ret" in text

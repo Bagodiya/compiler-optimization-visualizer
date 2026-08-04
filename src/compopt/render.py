@@ -1,6 +1,7 @@
 """Turning cleaned-up assembly into the side-by-side view on screen."""
 
 import re
+from collections.abc import Sequence
 
 from rich.table import Table
 from rich.text import Text
@@ -19,6 +20,13 @@ MIN_COLUMN_WIDTH = 26
 # eight, so a short line ends up looking too wide and gets cut off for no reason.
 # turn tabs into plain spaces up front so the width we measure is the width we draw.
 TAB_WIDTH = 4
+
+# what sits in the notes column on a line an annotation runs through but didn't
+# start on. the name goes on the first line only — repeating it down the whole
+# span would drown out the asm, and a body-wide annotation like register
+# coalescing would repeat it on every row — so this is just enough to show the
+# note hasn't finished yet.
+SPAN_MARKER = "·"
 
 
 def levels_for_width(width: int) -> list[str]:
@@ -99,6 +107,57 @@ def line_number_gutter(count: int, color: bool = True) -> Text:
             out.append("\n")
         out.append(str(n).rjust(pad), style=style)
     return out
+
+
+def annotation_gutter(annotations: Sequence, count: int, color: bool = True) -> Text:
+    """The notes that run down the right of the asm, one entry per line.
+
+    An annotation's name goes against the line it starts on, and the lines it
+    carries on through get `SPAN_MARKER` instead. Two annotations can start on
+    the same line — a body small enough to fit in registers is usually also a
+    body that lost instructions, so coalescing and dead code land together —
+    so the names are joined rather than one of them winning.
+
+    Always `count` lines long, so it lines up row for row with the asm beside
+    it in the same table cell.
+    """
+    out = Text()
+    for number in range(1, count + 1):
+        if number > 1:
+            out.append("\n")
+        starting = [note.name for note in annotations if note.start == number]
+        if starting:
+            out.append(", ".join(starting), style="yellow" if color else "")
+        elif any(note.covers(number) for note in annotations):
+            out.append(SPAN_MARKER, style="dim" if color else "")
+    return out
+
+
+def render_annotated(header: str, body: str, annotations: Sequence,
+                     color: bool = True) -> Table:
+    """Lay one function's assembly out with its optimizations beside it.
+
+    Same shape as `render_columns` — line numbers on the left, one row holding
+    everything — with a notes column on the right instead of a second level of
+    asm. The numbers an annotation carries are counted the same way the gutter
+    counts, so a note sits on the row it's talking about.
+    """
+    lines = body.splitlines()
+    table = Table(pad_edge=False)
+    table.add_column("", justify="right")
+    table.add_column(header, overflow="ellipsis", no_wrap=True)
+    # no_wrap here for the same reason the asm column has it, but the reason is
+    # sharper: the notes are one cell of text lined up against another, so a
+    # note that folds onto a second row pushes every note below it down one and
+    # they all end up pointing at the wrong instruction. Cutting a long note
+    # short is fine — the list underneath the table has the full names.
+    table.add_column("optimizations", overflow="ellipsis", no_wrap=True)
+    table.add_row(
+        line_number_gutter(len(lines), color),
+        highlight_asm(body.expandtabs(TAB_WIDTH), color),
+        annotation_gutter(annotations, len(lines), color),
+    )
+    return table
 
 
 def render_columns(columns: list[tuple[str, str]], color: bool = True) -> Table:
