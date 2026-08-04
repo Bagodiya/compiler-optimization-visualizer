@@ -169,3 +169,35 @@ def test_elf_is_not_mistaken_for_mach_o_by_one_underscore() -> None:
     # every other function invisible
     elf = "_start:\n\tret\nmain:\n.L2:\n\tret\n"
     assert function_names(elf) == ["_start", "main"]
+
+
+# what gcc leaves behind on ELF for a file with nothing in it. the numeric
+# labels are the assembler's own, referred to as `1f`/`1b` rather than by name
+GNU_PROPERTY_NOTE = """\t.section\t.note.gnu.property,"a"
+\t.align 8
+\t.long\t 1f - 0f
+\t.long\t 4f - 1f
+\t.long\t 5
+0:
+\t.string\t "GNU"
+1:
+\t.align 8
+4:
+"""
+
+
+def test_numeric_labels_are_not_functions() -> None:
+    assert function_names(GNU_PROPERTY_NOTE) == []
+
+
+def test_a_file_with_no_functions_isolates_to_nothing() -> None:
+    # this is what `annotate` leans on to say there was nothing to look at;
+    # picking `0:` up as a function made it report the note block instead
+    assert isolate_function(strip_directives(GNU_PROPERTY_NOTE)) == ""
+
+
+def test_numeric_labels_do_not_end_a_real_function() -> None:
+    # the note block sits in the same translation unit as real code
+    asm = "add:\n\tleal\t(%rdi,%rsi), %eax\n\tret\n" + GNU_PROPERTY_NOTE
+    assert function_names(asm) == ["add"]
+    assert "leal" in isolate_function(asm)

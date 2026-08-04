@@ -100,6 +100,13 @@ def _label_name(line: str, macho: bool = False) -> str | None:
     name = name[:-1]
     if not name:
         return None
+    if name.isdigit():
+        # a numeric label — the assembler's own kind, referred to as 1f or 1b
+        # rather than by name. gcc builds the .note.gnu.property block out of
+        # them on ELF, so a file with no functions in it still ends up with a
+        # `0:` at column 0 and this is what stops it reading as one. Safe
+        # everywhere: an identifier can't start with a digit in the first place.
+        return None
     if macho:
         return name if name.startswith("_") else None
     return None if name.startswith(".") else name
