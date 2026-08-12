@@ -22,7 +22,7 @@ source.c
 one body per level
    ├─ show      lay them out in columns          (render.py)
    ├─ diff      line up two of them              (diff.py)
-   └─ annotate  run the detectors over -O0 + one (annotate.py)
+   └─ annotate  run the detectors over -O0 + one (detectors/)
    ▼
 printed to the terminal
 ```
@@ -145,22 +145,46 @@ optimizer took the code apart instead of inlining it. And `is_identical` gets
 asked before trimming, not after — trimming turns a run of unchanged lines into
 a gap entry, so a body that didn't change at all stops looking like one.
 
-### `annotate.py`
-The `Annotation` type, the detectors, and the command that runs them. The type
-is frozen and validates its own line range on the way in, since a bad range
-turns into a note pointing at the wrong instruction, which is miserable to
-debug from the output alone.
+### `annotation.py`
+Just the `Annotation` type. It's frozen and validates its own line range on the
+way in, since a bad range turns into a note pointing at the wrong instruction,
+which is miserable to debug from the output alone. It sits on its own because
+the renderer wants it as much as the detectors do, and it doesn't need to know
+anything about either.
 
-The detectors split into two groups and `find_annotations` knows which is
-which. Some can work off the optimized body on its own, because what they look
+### `detectors/`
+One optimization per module — `frame.py`, `folding.py`, `registers.py`,
+`deadcode.py`, `loops.py`, `calls.py`, `arithmetic.py`, `branches.py`,
+`vectors.py` — each holding the detector, whatever helpers only it uses, and
+its own name and description string. `calls.py` is the one with two in it: tail
+calls and inlining both turn on whether a callee is still reached from here,
+and `detect_inlining` has to rule out a tail call before it can claim anything,
+so splitting them would only mean one importing the other.
+
+`parsing.py` underneath is the shared part: `parse_instruction` turns a line
+into a mnemonic and operands with the AT&T `%` off and everything lowercased,
+which is what lets one detector cope with both syntaxes, plus the register
+names and jump mnemonics more than one of them needs. Anything only one
+detector asks for stays in that detector's file.
+
+`__init__.py` collects them. The two tuples split the detectors by what they
+need: some can work off the optimized body on its own, because what they look
 for is visible in it — a prologue that isn't there, a literal where a
 calculation used to be. The rest need `-O0` as well, because what they look for
 is something that stopped being there, and absence has no shape of its own.
+`find_annotations` runs both groups and sorts what comes back, and
+`DESCRIPTIONS` is the same set keyed by name for `--explain`.
 
 They report the shape they see rather than what the compiler says it did, so
 several of them can't separate an optimization from source that was written
 that way to begin with. Each docstring says which way it errs. Reading gcc's
 `-fopt-info` would settle those, and that's the obvious next step.
+
+### `annotate.py`
+What's left of the command once the detecting moved out: check the path, pick
+the compiler, compile `-O0` and the level asked for, pull the wanted function
+out of each, and print the asm with the findings beside it. `--explain` short-
+circuits all of that, which is why the path argument is optional.
 
 ## A couple of decisions
 

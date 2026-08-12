@@ -1,5 +1,8 @@
 """Tests for the annotate command, the Annotation type, and the detectors.
 
+The detectors live one per module under `compopt.detectors` now, and the
+package re-exports them, so the imports below still come in one go.
+
 Some of these build annotations by hand and check the range bookkeeping — the
 part every detector depends on. The rest feed hand-written function bodies to
 the detectors, one body per case, so it's obvious from the sample what's meant
@@ -14,7 +17,10 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from compopt.annotate import (
+from compopt.annotation import Annotation
+from compopt.cli import app
+from compopt.compilers import find_compilers
+from compopt.detectors import (
     BRANCH_ELIMINATION,
     CONSTANT_FOLDING,
     DEAD_CODE_ELIMINATION,
@@ -25,7 +31,6 @@ from compopt.annotate import (
     STRENGTH_REDUCTION,
     TAIL_CALL,
     VECTORIZATION,
-    Annotation,
     called_functions,
     detect_branch_elimination,
     detect_constant_folding,
@@ -48,8 +53,6 @@ from compopt.annotate import (
     uses_stack_slots,
     vector_line_range,
 )
-from compopt.cli import app
-from compopt.compilers import find_compilers
 
 runner = CliRunner()
 

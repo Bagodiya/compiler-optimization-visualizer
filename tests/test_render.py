@@ -6,7 +6,7 @@ we just feed them assembly text and check what comes back out.
 
 from rich.console import Console
 
-from compopt.annotate import Annotation
+from compopt.annotation import Annotation
 from compopt.render import (
     ALL_LEVELS,
     MIN_COLUMN_WIDTH,
