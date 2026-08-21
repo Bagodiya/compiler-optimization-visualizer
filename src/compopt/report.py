@@ -7,11 +7,14 @@ every pass that fired, every one that wanted to fire and couldn't, each with
 the source line it was looking at.
 
 The two disagree often enough to be interesting, which is the whole point of
-the report. This module only gets the text out; reading it is the next step.
+the report. This module gets the text out and turns it into records; lining
+those up against the asm is the next step.
 """
 
+import re
 import subprocess
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 
 from compopt.compilers import CompileError
@@ -92,3 +95,107 @@ def capture_opt_info(source: Path, level: str, compiler: str) -> str:
         # that accepted the flag and then wrote nowhere shouldn't blow up here.
         # -O0 lands on the empty string legitimately: no passes, no report.
         return info.read_text() if info.exists() else ""
+
+
+# what gcc puts before the colon to say how the pass went. "optimized" is a
+# pass that fired, "missed" is one that wanted to and gave up, and "note" is
+# everything else it decided was worth mentioning on the way. they're the only
+# three -fopt-info knows about, so anything else on a line means we misread it.
+OPTIMIZED = "optimized"
+MISSED = "missed"
+NOTE = "note"
+KINDS = (OPTIMIZED, MISSED, NOTE)
+
+# a reported line looks like
+#
+#     loop.c:3:23: optimized: loop vectorized using 16 byte vectors
+#     missed.c:2:23: missed: couldn't vectorize loop
+#     loop.c:10:40: optimized:  Inlining helper/2 into caller/3.
+#
+# file, line, column, kind, message. the column is optional because older gcc
+# leaves it off, and the file part is non-greedy so a path with colons in it
+# doesn't eat the line number. the double space in the inlining message is
+# gcc's, not a typo, which is why the message is stripped afterwards.
+REPORT_LINE = re.compile(
+    r"^(?P<file>.+?):(?P<line>\d+)(?::(?P<column>\d+))?: "
+    r"(?P<kind>optimized|missed|note): *(?P<message>.*)$"
+)
+
+
+@dataclass(frozen=True, slots=True)
+class OptRecord:
+    """One thing the compiler said about one place in the source.
+
+    - ``kind`` which of `KINDS` it was
+    - ``message`` what it said, with gcc's leading spaces taken off
+    - ``file``, ``line``, ``column`` where in the *source* it was looking.
+      Note that's the .c file, not the asm — the asm line these belong next
+      to is what step 61 has to work out.
+
+    The column is None when the compiler didn't give one. Frozen for the same
+    reason `Annotation` is: it's a record of something already said, and
+    nothing downstream should be editing the compiler's words.
+    """
+
+    kind: str
+    message: str
+    file: str
+    line: int
+    column: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.kind not in KINDS:
+            raise ValueError(f"{self.kind!r} is not one of {KINDS}")
+        if self.line < 1:
+            raise ValueError(f"line must be 1 or greater, got {self.line}")
+
+    @property
+    def helped(self) -> bool:
+        """Whether this one is a pass that actually fired."""
+        return self.kind == OPTIMIZED
+
+    def where(self) -> str:
+        """The source position back in gcc's own `file:line:col` spelling."""
+        if self.column is None:
+            return f"{self.file}:{self.line}"
+        return f"{self.file}:{self.line}:{self.column}"
+
+
+def parse_record(line: str) -> OptRecord | None:
+    """Turn one line of the report into a record, or None if it isn't one.
+
+    -fopt-info-all mixes the located reports in with the passes' own running
+    commentary — "BB 3 is always executed in loop 1", "Unit growth for small
+    function inlining: 16->16 (0%)", blank lines between phases. None of that
+    names a source position, so there's nowhere to hang it in the output and
+    nothing for step 61 to match it against. Those come back as None and the
+    caller drops them.
+    """
+    match = REPORT_LINE.match(line)
+    if match is None:
+        return None
+
+    column = match.group("column")
+    return OptRecord(
+        kind=match.group("kind"),
+        message=match.group("message").strip(),
+        file=match.group("file"),
+        line=int(match.group("line")),
+        column=None if column is None else int(column),
+    )
+
+
+def parse_opt_info(text: str) -> list[OptRecord]:
+    """Every located report in a captured -fopt-info-all run, in order.
+
+    Kept in the order gcc printed them, which is the order the passes ran, and
+    kept whole — gcc says the same thing several times over when a pass retries
+    a loop with different vector widths, and the repeats are how you tell it
+    tried hard. Anything that wants one line per finding can fold them later.
+    """
+    records = []
+    for line in text.splitlines():
+        record = parse_record(line)
+        if record is not None:
+            records.append(record)
+    return records

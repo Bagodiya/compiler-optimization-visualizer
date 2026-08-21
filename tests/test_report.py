@@ -1,5 +1,6 @@
-"""Tests for getting gcc's -fopt-info-all report out of a compile."""
+"""Tests for getting gcc's -fopt-info-all report out of a compile, and reading it."""
 
+import dataclasses
 import subprocess
 from pathlib import Path
 
@@ -8,9 +9,15 @@ import pytest
 from compopt import report
 from compopt.compilers import CompileError, find_compilers
 from compopt.report import (
+    MISSED,
+    NOTE,
     OPT_INFO_FLAG,
+    OPTIMIZED,
     OptInfoUnsupported,
+    OptRecord,
     capture_opt_info,
+    parse_opt_info,
+    parse_record,
     rejected_the_flag,
 )
 
@@ -240,3 +247,161 @@ def test_real_gcc_rejects_broken_source(tmp_path: Path) -> None:
 
     with pytest.raises(CompileError):
         capture_opt_info(src, "2", gcc)
+
+
+# reading the report back
+
+
+# straight out of `gcc-15 -O3 -fopt-info-all` on a file with a summable loop
+# and a small static function called twice, so the chatter between the located
+# lines is the real thing and not something I made up to be easy to skip.
+REAL_REPORT = """loop.c:10:40: note: Considering inline candidate helper/2.
+loop.c:10:40: optimized:  Inlining helper/2 into caller/3.
+Unit growth for small function inlining: 16->16 (0%)
+
+Inlined 2 calls, eliminated 1 functions
+
+BB 3 is always executed in loop 1
+loop.c:3:23: optimized: loop vectorized using 16 byte vectors
+loop.c:1:5: note: vectorized 1 loops in function.
+missed.c:2:23: missed: couldn't vectorize loop
+"""
+
+
+def test_reads_one_reported_line() -> None:
+    record = parse_record("loop.c:3:23: optimized: loop vectorized using 16 byte vectors")
+
+    assert record is not None
+    assert record.kind == OPTIMIZED
+    assert record.file == "loop.c"
+    assert record.line == 3
+    assert record.column == 23
+    assert record.message == "loop vectorized using 16 byte vectors"
+
+
+def test_reads_a_missed_pass() -> None:
+    record = parse_record("missed.c:2:23: missed: couldn't vectorize loop")
+
+    assert record is not None
+    assert record.kind == MISSED
+    assert not record.helped
+
+
+def test_gccs_extra_space_comes_off() -> None:
+    # gcc writes the inlining ones with two spaces after the colon
+    record = parse_record("loop.c:10:40: optimized:  Inlining helper/2 into caller/3.")
+
+    assert record is not None
+    assert record.message == "Inlining helper/2 into caller/3."
+
+
+def test_column_is_optional() -> None:
+    record = parse_record("loop.c:3: note: vectorized 1 loops in function.")
+
+    assert record is not None
+    assert record.line == 3
+    assert record.column is None
+
+
+def test_a_path_with_a_colon_in_it_still_parses() -> None:
+    record = parse_record("/tmp/odd:name/loop.c:3:23: missed: couldn't vectorize loop")
+
+    assert record is not None
+    assert record.file == "/tmp/odd:name/loop.c"
+    assert record.line == 3
+
+
+def test_pass_chatter_is_not_a_record() -> None:
+    # no source position on any of these, so there's nowhere to put them
+    assert parse_record("BB 3 is always executed in loop 1") is None
+    assert parse_record("Unit growth for small function inlining: 16->16 (0%)") is None
+    assert parse_record("Inlined 2 calls, eliminated 1 functions") is None
+    assert parse_record("") is None
+
+
+def test_an_unknown_kind_is_not_a_record() -> None:
+    # a warning is a different thing to a pass report and shouldn't sneak in
+    assert parse_record("loop.c:3:23: warning: unused variable 'x'") is None
+
+
+def test_parses_a_whole_report() -> None:
+    records = parse_opt_info(REAL_REPORT)
+
+    assert len(records) == 5
+    assert [r.kind for r in records] == [NOTE, OPTIMIZED, OPTIMIZED, NOTE, MISSED]
+
+
+def test_report_order_is_kept() -> None:
+    records = parse_opt_info(REAL_REPORT)
+
+    # inlining runs before vectorization, and the report should still say so
+    assert "Inlining" in records[1].message
+    assert "vectorized" in records[2].message
+
+
+def test_repeated_lines_are_all_kept() -> None:
+    # gcc retries a loop at several vector widths and complains each time. the
+    # repeats are the point — they say how hard it tried — so none get folded.
+    retries = "\n".join(
+        f"loop.c:4:13: note: ***** Analysis failed with vector mode V{n}SI" for n in (4, 8, 16)
+    )
+
+    assert len(parse_opt_info(retries)) == 3
+
+
+def test_an_empty_report_gives_nothing() -> None:
+    assert parse_opt_info("") == []
+
+
+# the record type itself
+
+
+def test_where_reads_back_like_gcc_wrote_it() -> None:
+    record = OptRecord(OPTIMIZED, "loop vectorized", "loop.c", 3, 23)
+
+    assert record.where() == "loop.c:3:23"
+
+
+def test_where_drops_the_missing_column() -> None:
+    record = OptRecord(NOTE, "vectorized 1 loops", "loop.c", 3)
+
+    assert record.where() == "loop.c:3"
+
+
+def test_only_optimized_counts_as_helped() -> None:
+    assert OptRecord(OPTIMIZED, "did it", "loop.c", 3).helped
+    assert not OptRecord(MISSED, "gave up", "loop.c", 3).helped
+    assert not OptRecord(NOTE, "thinking about it", "loop.c", 3).helped
+
+
+def test_a_made_up_kind_is_rejected() -> None:
+    with pytest.raises(ValueError):
+        OptRecord("warning", "unused variable", "loop.c", 3)
+
+
+def test_a_zero_line_is_rejected() -> None:
+    with pytest.raises(ValueError):
+        OptRecord(OPTIMIZED, "did it", "loop.c", 0)
+
+
+def test_records_do_not_change_after_building() -> None:
+    record = OptRecord(OPTIMIZED, "did it", "loop.c", 3)
+
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        record.message = "something else"
+
+
+def test_real_gcc_report_parses(tmp_path: Path) -> None:
+    gcc = real_gcc()
+    if gcc is None:
+        pytest.skip("no gcc that supports -fopt-info-all on this machine")
+
+    src = tmp_path / "loop.c"
+    src.write_text(LOOP_C)
+
+    records = parse_opt_info(capture_opt_info(src, "3", gcc))
+
+    # whatever it decided about this loop, it has to name the file it read
+    assert records
+    assert all(r.file.endswith("loop.c") for r in records)
+    assert any(r.helped for r in records)
