@@ -119,17 +119,26 @@ def choose_compiler(requested: str | None) -> str:
     return pick_compiler(requested, available)
 
 
-def compile_to_asm(source: Path, level: str, compiler: str) -> str:
+def compile_to_asm(source: Path, level: str, compiler: str, debug: bool = False) -> str:
     """Compile one source file at a single -O level and give back the asm.
 
     `level` is just the digit, so "2" turns into -O2. We ask the compiler
     for assembly (-S), drop it in a throwaway temp dir and read it back.
     The temp dir is removed once we have the text so nothing piles up.
+
+    With `debug` set we add -g, which sprinkles .file and .loc directives
+    through the output saying which line of C each run of instructions came
+    from. `crossref` needs those to put the report next to the right
+    instructions. It's off by default because it makes the asm a good deal
+    noisier to read, and -g doesn't change the code that gets generated, so
+    the two spellings are the same program either way.
     """
     with tempfile.TemporaryDirectory(prefix="compopt-") as workdir:
         out = Path(workdir) / "out.s"
 
         cmd = [compiler, "-S", f"-O{level}", str(source), "-o", str(out)]
+        if debug:
+            cmd.insert(1, "-g")
         # don't use check=True here: we want to grab stderr and wrap it
         # in our own error rather than let CalledProcessError escape.
         result = subprocess.run(cmd, capture_output=True, text=True)
