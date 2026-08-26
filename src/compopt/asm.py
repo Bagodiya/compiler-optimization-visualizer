@@ -42,6 +42,25 @@ _MACHO_SYMBOL = re.compile(r"^_\w+:", re.M)
 _ELF_LOCAL_LABEL = re.compile(r"^\.L\w*:", re.M)
 
 
+# The label the compiler drops in the moment a function is over. gcc writes
+# `.LFE0:` on ELF and a bare `LFE0:` on Mach-O, clang writes `.Lfunc_end0:` and
+# `Lfunc_end0:` the same way round. All four are local labels, so they never
+# read as functions, but they are the only thing that says where the code stops.
+#
+# Without one, "the next function label" is the only boundary there is, and the
+# last function in the file gets everything after it. That is harmless while
+# there is nothing after it, and stops being harmless with -g: the DWARF tables
+# go on the end and a 22-line function comes back 334 lines long. They are all
+# directives so the matching in `crossref` still works, but nobody wants to read
+# them.
+_FUNCTION_END = re.compile(r"^\.?L(?:FE|func_end)\d+:")
+
+
+def _is_function_end(line: str) -> bool:
+    """True if a line is the compiler's marker for the end of a function."""
+    return bool(_FUNCTION_END.match(line))
+
+
 def _is_macho(asm: str) -> bool:
     """Whether this assembly is Mach-O, which decides what a label means.
 
@@ -139,10 +158,11 @@ def function_names(asm: str) -> list[str]:
 def isolate_function(asm: str, name: str | None = None) -> str:
     """Pull out the lines belonging to a single function.
 
-    Grabs everything from the function's label down to (but not including)
-    the next function label, so the local ``.L`` labels in between come along
-    for the ride. With no name we just take the first function we find, which
-    is usually the one you care about in these little example files.
+    Grabs everything from the function's label down to whichever comes first:
+    the label the compiler puts at the end of the function, or the label that
+    opens the next one. The local ``.L`` labels in between come along for the
+    ride. With no name we just take the first function we find, which is
+    usually the one you care about in these little example files.
 
     Raises KeyError if a name is given but no such function exists.
     """
@@ -163,6 +183,8 @@ def isolate_function(asm: str, name: str | None = None) -> str:
 
     # stop at the next function, or run to the end if this is the last one
     end = next((i for i in starts if i > begin), len(lines))
+    # and stop earlier still if the compiler said where the function ended
+    end = next((i for i in range(begin + 1, end) if _is_function_end(lines[i])), end)
     return "\n".join(lines[begin:end]).rstrip()
 
 

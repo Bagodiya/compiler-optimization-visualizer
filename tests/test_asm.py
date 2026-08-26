@@ -201,3 +201,39 @@ def test_numeric_labels_do_not_end_a_real_function() -> None:
     asm = "add:\n\tleal\t(%rdi,%rsi), %eax\n\tret\n" + GNU_PROPERTY_NOTE
     assert function_names(asm) == ["add"]
     assert "leal" in isolate_function(asm)
+
+
+# with -g the debug tables land after the last function, and there is no next
+# function label to stop at — the end-of-function label is all there is
+DEBUG_TAIL = """_sum:                                   ## @sum
+Lfunc_begin0:
+\tmovl\t%edi, %eax
+\tretq
+Lfunc_end0:
+Lsection_debug_loc:
+Ldebug_loc0:
+\t.quad\t0
+\t.byte\t3
+"""
+
+
+def test_a_function_stops_at_its_end_label() -> None:
+    body = isolate_function(DEBUG_TAIL)
+    assert "movl\t%edi, %eax" in body
+    assert body.strip().endswith("retq")
+    # none of the DWARF that follows belongs to the function
+    assert "Ldebug_loc0:" not in body
+    assert "Lfunc_end0:" not in body
+
+
+def test_the_elf_spelling_of_the_end_label_works_too() -> None:
+    asm = "add:\n.LFB0:\n\tleal\t(%rdi,%rsi), %eax\n\tret\n.LFE0:\n.Lframe0:\n\t.long\t7\n"
+    body = isolate_function(asm)
+    assert "leal" in body
+    assert ".Lframe0:" not in body
+
+
+def test_the_next_function_still_ends_one_without_an_end_label() -> None:
+    # clang without -g emits no end label at all, so the old boundary is still
+    # the only one there is
+    assert isolate_function(TWO_FUNCS).strip().endswith("ret")
