@@ -17,9 +17,12 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
+from compopt import annotate as annotate_mod
+from compopt.annotate import _asm_range
 from compopt.annotation import Annotation
 from compopt.cli import app
 from compopt.compilers import find_compilers
+from compopt.crossref import LocatedRecord
 from compopt.detectors import (
     BRANCH_ELIMINATION,
     CONSTANT_FOLDING,
@@ -53,6 +56,7 @@ from compopt.detectors import (
     uses_stack_slots,
     vector_line_range,
 )
+from compopt.report import MISSED, OPTIMIZED, OptInfoUnsupported, OptRecord
 
 runner = CliRunner()
 
@@ -1339,3 +1343,157 @@ def test_annotate_lists_a_description_for_each_finding(tmp_path: Path) -> None:
     assert result.exit_code == 0
     # a name on its own doesn't tell you what the compiler did
     assert explain(CONSTANT_FOLDING).split(",")[0] in result.stdout
+
+
+# --report: the compiler's own account of what it did
+
+
+# what a gcc report looks like once it's down to the located lines. the source
+# it goes with is SUM_C below: the loop is on line 3 and the return on line 5.
+SAMPLE_REPORT = """sum.c:3:5: optimized: loop vectorized using 16 byte vectors
+sum.c:3:5: missed: couldn't vectorize loop
+Unit growth for small function inlining: 16->16 (0%)
+sum.c:900:1: missed: statement clobbers memory
+"""
+
+SUM_C = """int total(const int *xs, int n) {
+    int sum = 0;
+    for (int i = 0; i < n; i++)
+        sum += xs[i];
+    return sum;
+}
+"""
+
+
+def fake_report(text: str):
+    """Stand in for capture_opt_info so the tests don't need a real gcc.
+
+    The other half of --report is a plain compile, which the real compiler on
+    this machine can do — it's only the -fopt-info-all run that needs gcc.
+    """
+    return lambda path, level, compiler: text
+
+
+def record(line: int, kind: str = OPTIMIZED, message: str = "did a thing"):
+    return OptRecord(kind=kind, message=message, file="sum.c", line=line)
+
+
+def test_asm_range_names_a_single_line() -> None:
+    found = LocatedRecord(record(3), (7,))
+    assert _asm_range(found) == "asm line 7"
+
+
+def test_asm_range_folds_a_run_into_one_span() -> None:
+    found = LocatedRecord(record(3), (7, 8, 9))
+    assert _asm_range(found) == "asm lines 7-9"
+
+
+def test_asm_range_keeps_separate_runs_apart() -> None:
+    # an unrolled loop alternates between two source lines, so one of them
+    # lands in several places and 7-20 would be claiming lines it doesn't own
+    found = LocatedRecord(record(3), (7, 8, 15, 16))
+    assert _asm_range(found) == "asm lines 7-8, 15-16"
+
+
+def test_asm_range_says_so_when_nothing_matched() -> None:
+    # a missed pass generated no code, which is the point of it being missed
+    assert "no asm" in _asm_range(LocatedRecord(record(3, MISSED)))
+
+
+@needs_compiler
+def test_report_prints_what_the_compiler_said(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(annotate_mod, "capture_opt_info", fake_report(SAMPLE_REPORT))
+    src = tmp_path / "sum.c"
+    src.write_text(SUM_C)
+
+    result = runner.invoke(app, ["annotate", str(src), "--report",
+                                 "--no-color", "--width", "200"])
+    assert result.exit_code == 0
+    assert "loop vectorized using 16 byte vectors" in result.stdout
+    assert "couldn't vectorize loop" in result.stdout
+
+
+@needs_compiler
+def test_report_drops_the_lines_that_name_no_source_position(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setattr(annotate_mod, "capture_opt_info", fake_report(SAMPLE_REPORT))
+    src = tmp_path / "sum.c"
+    src.write_text(SUM_C)
+
+    result = runner.invoke(app, ["annotate", str(src), "--report",
+                                 "--no-color", "--width", "200"])
+    # the passes' running commentary has nowhere to hang, so it isn't printed
+    assert "Unit growth" not in result.stdout
+    assert "3 things" in result.stdout
+
+
+@needs_compiler
+def test_report_says_when_a_record_matched_no_asm(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(annotate_mod, "capture_opt_info", fake_report(SAMPLE_REPORT))
+    src = tmp_path / "sum.c"
+    src.write_text(SUM_C)
+
+    result = runner.invoke(app, ["annotate", str(src), "--report",
+                                 "--no-color", "--width", "200"])
+    # line 900 isn't in the file, so nothing can have come from it
+    assert "no asm came from this line" in result.stdout
+
+
+@needs_compiler
+def test_report_finds_the_asm_for_a_line_that_is_really_there(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setattr(annotate_mod, "capture_opt_info", fake_report(SAMPLE_REPORT))
+    src = tmp_path / "sum.c"
+    src.write_text(SUM_C)
+
+    result = runner.invoke(app, ["annotate", str(src), "--report",
+                                 "--no-color", "--width", "200"])
+    # the loop on line 3 has to come out as instructions somewhere
+    assert "asm line" in result.stdout
+
+
+@needs_compiler
+def test_report_says_so_when_the_compiler_said_nothing(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setattr(annotate_mod, "capture_opt_info", fake_report(""))
+    src = tmp_path / "sum.c"
+    src.write_text(SUM_C)
+
+    result = runner.invoke(app, ["annotate", str(src), "--report", "--level", "0",
+                                 "--no-color", "--width", "200"])
+    assert result.exit_code == 0
+    assert "reported nothing" in result.stdout
+
+
+@needs_compiler
+def test_report_stops_cleanly_when_the_compiler_lacks_the_flag(
+    tmp_path: Path, monkeypatch
+) -> None:
+    def refuse(path, level, compiler):
+        raise OptInfoUnsupported(compiler)
+
+    monkeypatch.setattr(annotate_mod, "capture_opt_info", refuse)
+    src = tmp_path / "sum.c"
+    src.write_text(SUM_C)
+
+    result = runner.invoke(app, ["annotate", str(src), "--report", "--no-color"])
+    assert result.exit_code == 1
+    # this is the everyday case on macOS, so it has to read as an explanation
+    # rather than a crash
+    assert "-fopt-info-all" in result.stderr
+
+
+@needs_compiler
+def test_report_reports_an_unknown_function_the_same_way_annotate_does(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setattr(annotate_mod, "capture_opt_info", fake_report(SAMPLE_REPORT))
+    src = tmp_path / "sum.c"
+    src.write_text(SUM_C)
+
+    result = runner.invoke(app, ["annotate", str(src), "--report", "--func", "nope"])
+    assert result.exit_code == 1
+    assert "no function named" in result.stderr

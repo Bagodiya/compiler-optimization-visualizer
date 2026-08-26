@@ -149,6 +149,10 @@ def annotate(
         str | None,
         typer.Option("--explain", help="Describe one optimization by name and exit."),
     ] = None,
+    report: Annotated[
+        bool,
+        typer.Option("--report", help="Print the compiler's own pass report instead."),
+    ] = False,
     no_color: Annotated[
         bool,
         typer.Option("--no-color", help="Disable color in the output."),
@@ -164,7 +168,7 @@ def annotate(
 ) -> None:
     """Name the optimizations the compiler applied to a source file."""
     try:
-        run_annotate(path, level, func, summary, explain, no_color, width, compiler)
+        run_annotate(path, level, func, summary, explain, no_color, width, compiler, report)
     except CompileError as err:
         typer.echo(f"error: {err.compiler} could not compile {path}", err=True)
         typer.echo(err.message, err=True)
