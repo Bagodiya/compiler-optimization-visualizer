@@ -131,10 +131,16 @@ class OptRecord:
     - ``file``, ``line``, ``column`` where in the *source* it was looking.
       Note that's the .c file, not the asm — the asm line these belong next
       to is what step 61 has to work out.
+    - ``pass_name`` which pass said it, when the compiler named one.
 
-    The column is None when the compiler didn't give one. Frozen for the same
-    reason `Annotation` is: it's a record of something already said, and
-    nothing downstream should be editing the compiler's words.
+    The column is None when the compiler didn't give one. So is the pass
+    name: clang tags every remark with the pass behind it, gcc leaves it in
+    the wording if it mentions it at all, so records off `-fopt-info-all`
+    never carry one and records off `-Rpass` always do.
+
+    Frozen for the same reason `Annotation` is: it's a record of something
+    already said, and nothing downstream should be editing the compiler's
+    words.
     """
 
     kind: str
@@ -142,6 +148,7 @@ class OptRecord:
     file: str
     line: int
     column: int | None = None
+    pass_name: str | None = None
 
     def __post_init__(self) -> None:
         if self.kind not in KINDS:
