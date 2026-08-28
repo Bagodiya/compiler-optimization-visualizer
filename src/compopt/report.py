@@ -7,8 +7,9 @@ every pass that fired, every one that wanted to fire and couldn't, each with
 the source line it was looking at.
 
 The two disagree often enough to be interesting, which is the whole point of
-the report. This module gets the text out and turns it into records; lining
-those up against the asm is the next step.
+the report. This module gets the text out and turns it into records; `crossref`
+lines those up against the asm, and `passes` picks between this and the clang
+half in `remarks`.
 """
 
 import re

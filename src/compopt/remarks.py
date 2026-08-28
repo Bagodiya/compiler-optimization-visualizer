@@ -18,8 +18,8 @@ rather than adding a branch to every function in it:
 - clang names the pass that spoke. gcc leaves it in the wording, when it
   mentions it at all.
 
-Nothing calls this yet. Putting one report in front of both compilers is step
-64; this is the half that gets the words out of clang.
+`passes.py` is what puts one report in front of both; this is the half that
+gets the words out of clang.
 """
 
 import re

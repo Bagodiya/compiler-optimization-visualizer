@@ -17,7 +17,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from compopt import annotate as annotate_mod
+from compopt import passes as passes_mod
 from compopt.annotate import _asm_range
 from compopt.annotation import Annotation
 from compopt.cli import app
@@ -56,6 +56,7 @@ from compopt.detectors import (
     uses_stack_slots,
     vector_line_range,
 )
+from compopt.remarks import RemarksUnsupported
 from compopt.report import MISSED, OPTIMIZED, OptInfoUnsupported, OptRecord
 
 runner = CliRunner()
@@ -1356,6 +1357,12 @@ Unit growth for small function inlining: 16->16 (0%)
 sum.c:900:1: missed: statement clobbers memory
 """
 
+# the same file put through clang instead, which tags every remark with the
+# pass behind it
+CLANG_REMARKS = """sum.c:3:5: remark: vectorized loop (width: 4) [-Rpass=loop-vectorize]
+sum.c:5:12: remark: 3 spills generated [-Rpass-missed=regalloc]
+"""
+
 SUM_C = """int total(const int *xs, int n) {
     int sum = 0;
     for (int i = 0; i < n; i++)
@@ -1368,10 +1375,20 @@ SUM_C = """int total(const int *xs, int n) {
 def fake_report(text: str):
     """Stand in for capture_opt_info so the tests don't need a real gcc.
 
+    Patched into `passes`, which is where --report gets its records from now,
+    rather than into `annotate`. Answering there means `collect_report` takes
+    the gcc route and never tries the clang one, so these stay tests of the
+    printing whichever compiler is installed.
+
     The other half of --report is a plain compile, which the real compiler on
     this machine can do — it's only the -fopt-info-all run that needs gcc.
     """
     return lambda path, level, compiler: text
+
+
+def refuse_opt_info(path, level, compiler):
+    """Stand in for a compiler that isn't gcc, whatever it's called."""
+    raise OptInfoUnsupported(compiler)
 
 
 def record(line: int, kind: str = OPTIMIZED, message: str = "did a thing"):
@@ -1402,7 +1419,7 @@ def test_asm_range_says_so_when_nothing_matched() -> None:
 
 @needs_compiler
 def test_report_prints_what_the_compiler_said(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr(annotate_mod, "capture_opt_info", fake_report(SAMPLE_REPORT))
+    monkeypatch.setattr(passes_mod, "capture_opt_info", fake_report(SAMPLE_REPORT))
     src = tmp_path / "sum.c"
     src.write_text(SUM_C)
 
@@ -1417,7 +1434,7 @@ def test_report_prints_what_the_compiler_said(tmp_path: Path, monkeypatch) -> No
 def test_report_drops_the_lines_that_name_no_source_position(
     tmp_path: Path, monkeypatch
 ) -> None:
-    monkeypatch.setattr(annotate_mod, "capture_opt_info", fake_report(SAMPLE_REPORT))
+    monkeypatch.setattr(passes_mod, "capture_opt_info", fake_report(SAMPLE_REPORT))
     src = tmp_path / "sum.c"
     src.write_text(SUM_C)
 
@@ -1430,7 +1447,7 @@ def test_report_drops_the_lines_that_name_no_source_position(
 
 @needs_compiler
 def test_report_says_when_a_record_matched_no_asm(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr(annotate_mod, "capture_opt_info", fake_report(SAMPLE_REPORT))
+    monkeypatch.setattr(passes_mod, "capture_opt_info", fake_report(SAMPLE_REPORT))
     src = tmp_path / "sum.c"
     src.write_text(SUM_C)
 
@@ -1444,7 +1461,7 @@ def test_report_says_when_a_record_matched_no_asm(tmp_path: Path, monkeypatch) -
 def test_report_finds_the_asm_for_a_line_that_is_really_there(
     tmp_path: Path, monkeypatch
 ) -> None:
-    monkeypatch.setattr(annotate_mod, "capture_opt_info", fake_report(SAMPLE_REPORT))
+    monkeypatch.setattr(passes_mod, "capture_opt_info", fake_report(SAMPLE_REPORT))
     src = tmp_path / "sum.c"
     src.write_text(SUM_C)
 
@@ -1458,7 +1475,7 @@ def test_report_finds_the_asm_for_a_line_that_is_really_there(
 def test_report_says_so_when_the_compiler_said_nothing(
     tmp_path: Path, monkeypatch
 ) -> None:
-    monkeypatch.setattr(annotate_mod, "capture_opt_info", fake_report(""))
+    monkeypatch.setattr(passes_mod, "capture_opt_info", fake_report(""))
     src = tmp_path / "sum.c"
     src.write_text(SUM_C)
 
@@ -1469,28 +1486,64 @@ def test_report_says_so_when_the_compiler_said_nothing(
 
 
 @needs_compiler
-def test_report_stops_cleanly_when_the_compiler_lacks_the_flag(
+def test_report_falls_back_when_the_compiler_lacks_gccs_flag(
     tmp_path: Path, monkeypatch
 ) -> None:
-    def refuse(path, level, compiler):
-        raise OptInfoUnsupported(compiler)
+    monkeypatch.setattr(passes_mod, "capture_opt_info", refuse_opt_info)
+    monkeypatch.setattr(passes_mod, "capture_remarks", fake_report(CLANG_REMARKS))
+    src = tmp_path / "sum.c"
+    src.write_text(SUM_C)
 
-    monkeypatch.setattr(annotate_mod, "capture_opt_info", refuse)
+    result = runner.invoke(app, ["annotate", str(src), "--report",
+                                 "--no-color", "--width", "200"])
+    # the everyday case on macOS, where `gcc` is Apple clang: asking the other
+    # way works, so there is nothing here to report as an error
+    assert result.exit_code == 0
+    assert "-Rpass" in result.stdout
+    assert "vectorized loop" in result.stdout
+
+
+@needs_compiler
+def test_report_names_the_pass_when_the_compiler_named_one(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setattr(passes_mod, "capture_opt_info", refuse_opt_info)
+    monkeypatch.setattr(passes_mod, "capture_remarks", fake_report(CLANG_REMARKS))
+    src = tmp_path / "sum.c"
+    src.write_text(SUM_C)
+
+    result = runner.invoke(app, ["annotate", str(src), "--report",
+                                 "--no-color", "--width", "200"])
+    # gcc only ever says "missed". clang says which pass it was that gave up,
+    # and that is the more useful half of the line
+    assert "missed (regalloc)" in result.stdout
+
+
+@needs_compiler
+def test_report_stops_cleanly_when_neither_flag_is_understood(
+    tmp_path: Path, monkeypatch
+) -> None:
+    def refuse_remarks(path, level, compiler):
+        raise RemarksUnsupported(compiler)
+
+    monkeypatch.setattr(passes_mod, "capture_opt_info", refuse_opt_info)
+    monkeypatch.setattr(passes_mod, "capture_remarks", refuse_remarks)
     src = tmp_path / "sum.c"
     src.write_text(SUM_C)
 
     result = runner.invoke(app, ["annotate", str(src), "--report", "--no-color"])
     assert result.exit_code == 1
-    # this is the everyday case on macOS, so it has to read as an explanation
-    # rather than a crash
+    # a third compiler under a name we know, so the message has to name both
+    # flags we tried rather than read as a crash
     assert "-fopt-info-all" in result.stderr
+    assert "-Rpass" in result.stderr
 
 
 @needs_compiler
 def test_report_reports_an_unknown_function_the_same_way_annotate_does(
     tmp_path: Path, monkeypatch
 ) -> None:
-    monkeypatch.setattr(annotate_mod, "capture_opt_info", fake_report(SAMPLE_REPORT))
+    monkeypatch.setattr(passes_mod, "capture_opt_info", fake_report(SAMPLE_REPORT))
     src = tmp_path / "sum.c"
     src.write_text(SUM_C)
 

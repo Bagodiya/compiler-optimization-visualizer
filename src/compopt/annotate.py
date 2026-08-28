@@ -6,8 +6,9 @@ compile, pulling the wanted function out of each, and printing the result.
 
 `--report` is the same question asked the other way round. Instead of reading
 the asm and working backwards, it asks the compiler what it did and prints the
-answer. `report.py` gets that answer out, `crossref.py` works out which lines
-of asm each part of it is about, and the printing is down at the bottom here.
+answer. `passes.py` gets that answer out of whichever compiler is in front of
+it, `crossref.py` works out which lines of asm each part of it is about, and
+the printing is down at the bottom here.
 """
 
 from pathlib import Path
@@ -32,16 +33,15 @@ from compopt.crossref import (
     strip_debug_lines,
 )
 from compopt.detectors import DESCRIPTIONS, find_annotations, match_name
-from compopt.render import render_annotated
-from compopt.report import (
-    MISSED,
-    NOTE,
-    OPT_INFO_FLAG,
-    OPTIMIZED,
-    OptInfoUnsupported,
-    capture_opt_info,
-    parse_opt_info,
+from compopt.passes import (
+    RPASS_FLAG,
+    NoPassReport,
+    PassReport,
+    collect_report,
+    kind_label,
 )
+from compopt.render import render_annotated
+from compopt.report import MISSED, NOTE, OPT_INFO_FLAG, OPTIMIZED
 
 # the level everything is compared against. the detectors that need two bodies
 # need one where the compiler hasn't done anything yet, and that's -O0.
@@ -147,21 +147,30 @@ def _report_line(found: LocatedRecord, color: bool) -> Text:
     line = Text("  ")
     line.append(record.where(), style="dim" if color else "")
     line.append("  ")
-    line.append(f"{record.kind}: ", style=REPORT_STYLES[record.kind] if color else "")
+    line.append(f"{kind_label(record)}: ",
+                style=REPORT_STYLES[record.kind] if color else "")
     line.append(record.message)
     return line
 
 
-def _print_report(console: Console, located: list[LocatedRecord], level: str,
-                  compiler: str, quiet: str, color: bool) -> None:
-    """Print everything the compiler said, in the order its passes said it."""
+def _print_report(console: Console, report: PassReport, located: list[LocatedRecord],
+                  quiet: str, color: bool) -> None:
+    """Print everything the compiler said, in the order its passes said it.
+
+    The heading names the flag as well as the compiler. gcc and clang don't
+    report the same things at the same level, so two runs of this are only
+    worth putting side by side if each one says where its words came from.
+    """
+    said = f"{report.compiler} ({report.flag}) at -O{report.level}"
     if not located:
-        # -O0 lands here honestly: no passes ran, so there was nothing to say
-        console.print(f"{compiler} reported nothing at -O{level}", style=quiet)
+        # gcc lands here honestly at -O0: no passes ran, so there was nothing
+        # to say. clang doesn't, which is a difference worth seeing rather than
+        # one to paper over — see `remarks.capture_remarks`.
+        console.print(f"{said} reported nothing", style=quiet)
         return
 
     plural = "" if len(located) == 1 else "s"
-    console.print(f"{compiler} reported {len(located)} thing{plural} at -O{level}:\n")
+    console.print(f"{said} reported {len(located)} thing{plural}:\n")
     for found in located:
         console.print(_report_line(found, color))
         console.print(f"    {_asm_range(found)}", style=quiet)
@@ -171,10 +180,14 @@ def _run_report(console: Console, path: Path, level: str, func: str | None,
                 compiler: str, quiet: str, color: bool) -> None:
     """Answer `--report`: print what the compiler said, not what we worked out.
 
-    Two compiles, because the two halves come from different runs. One with
-    `-fopt-info-all` for the words, one with `-g` for the `.loc` directives
-    that say which asm each of those words is about. They're the same code
+    Two compiles, because the two halves come from different runs. One asking
+    the compiler what its passes did, one with `-g` for the `.loc` directives
+    that say which asm each of those answers is about. They're the same code
     either way — neither flag changes what gets generated.
+
+    Which flag the first compile uses is `passes.collect_report`'s problem, not
+    this one's. Whichever it turns out to be, what comes back is the same kind
+    of record, so everything below here reads the same for both compilers.
 
     The report covers the whole file while the asm is one function, so records
     about the rest of it still get printed and come out with no asm against
@@ -182,10 +195,13 @@ def _run_report(console: Console, path: Path, level: str, func: str | None,
     compiler said, which is the opposite of what this flag is for.
     """
     try:
-        text = capture_opt_info(path, level, compiler)
-    except OptInfoUnsupported as err:
-        typer.echo(f"error: {compiler} does not understand {OPT_INFO_FLAG}", err=True)
-        typer.echo("that flag is GNU gcc's; on macOS `gcc` is normally Apple clang",
+        report = collect_report(path, level, compiler)
+    except NoPassReport as err:
+        typer.echo(
+            f"error: {compiler} understands neither {OPT_INFO_FLAG} nor {RPASS_FLAG}",
+            err=True,
+        )
+        typer.echo("the first is gcc's and the second clang's, so this is neither",
                    err=True)
         raise typer.Exit(code=1) from err
 
@@ -193,8 +209,8 @@ def _run_report(console: Console, path: Path, level: str, func: str | None,
     body = _isolate_or_stop(strip_directives(asm), func)
     _, origin = strip_debug_lines(body)
 
-    located = cross_reference(parse_opt_info(text), origin, file_table(asm))
-    _print_report(console, located, level, compiler, quiet, color)
+    located = cross_reference(list(report.records), origin, file_table(asm))
+    _print_report(console, report, located, quiet, color)
 
 
 def run_annotate(path: Path | None, level: str = "2", func: str | None = None,
