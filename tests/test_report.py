@@ -1,6 +1,7 @@
 """Tests for getting gcc's -fopt-info-all report out of a compile, and reading it."""
 
 import dataclasses
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -9,6 +10,7 @@ import pytest
 from compopt import report
 from compopt.compilers import CompileError, find_compilers
 from compopt.report import (
+    KINDS,
     MISSED,
     NOTE,
     OPT_INFO_FLAG,
@@ -61,13 +63,25 @@ def fake_run(writes: str | None = None, returncode: int = 0, stderr: str = ""):
     return run
 
 
+# every name a gcc might be installed under, bare one first. homebrew puts it
+# on PATH as gcc-15 and leaves plain `gcc` pointing at Apple clang, so on a Mac
+# the bare name is the one that can't answer -fopt-info-all and the suffixed
+# one is the one that can. only looking at the bare name meant the gcc half of
+# this module was never tested anywhere but CI.
+GCC_NAMES = ["gcc"] + [f"gcc-{major}" for major in range(16, 9, -1)]
+
+
 def real_gcc() -> str | None:
     """The name of a gcc that really takes -fopt-info-all, if there is one.
 
-    On macOS `gcc` is usually Apple clang wearing gcc's name, so this is None
-    far more often than not and the tests below skip themselves.
+    Asking the compiler rather than trusting the name, for the same reason
+    `passes.collect_report` does: a flag it turns down is the only answer that
+    isn't a guess. `--version` makes it exit as soon as it has read the command
+    line, so this costs nothing.
     """
-    for name in find_compilers():
+    for name in GCC_NAMES:
+        if shutil.which(name) is None:
+            continue
         probe = subprocess.run(
             [name, f"{OPT_INFO_FLAG}=/dev/null", "--version"],
             capture_output=True,
@@ -324,6 +338,43 @@ def test_an_unknown_kind_is_not_a_record() -> None:
     assert parse_record("loop.c:3:23: warning: unused variable 'x'") is None
 
 
+def test_the_stars_on_a_vector_note_are_left_alone() -> None:
+    # gcc marks its vectorizer notes with a row of asterisks. only whitespace
+    # comes off the message, so the stars have to still be there afterwards.
+    record = parse_record("loop.c:5:13: note: ***** Analysis failed with vector mode V4SI")
+
+    assert record is not None
+    assert record.message == "***** Analysis failed with vector mode V4SI"
+
+
+def test_a_message_with_brackets_in_it_survives() -> None:
+    line = (
+        "loop.c:4:23: optimized: loop with 2 iterations completely unrolled "
+        "(header execution count 36207767)"
+    )
+    record = parse_record(line)
+
+    assert record is not None
+    assert record.message.endswith("(header execution count 36207767)")
+
+
+def test_gcc_records_never_name_a_pass() -> None:
+    # gcc leaves the pass in the wording if it mentions it at all, so there is
+    # nothing to put in the field. clang is the one that fills it in.
+    record = parse_record("loop.c:4:23: optimized: loop vectorized using 16 byte vectors")
+
+    assert record is not None
+    assert record.pass_name is None
+
+
+def test_the_loop_pass_talking_to_itself_is_not_a_record() -> None:
+    # these two come out of a real -O3 run and are the closest the chatter gets
+    # to looking like a report: numbers, commas, and a colon in the first one.
+    chatter = "loop 1's coldest_outermost_loop is 1, hotter_than_inner_loop is NULL"
+    assert parse_record(chatter) is None
+    assert parse_record("considering unrolling loop with constant number of iterations") is None
+
+
 def test_parses_a_whole_report() -> None:
     records = parse_opt_info(REAL_REPORT)
 
@@ -405,3 +456,91 @@ def test_real_gcc_report_parses(tmp_path: Path) -> None:
     assert records
     assert all(r.file.endswith("loop.c") for r in records)
     assert any(r.helped for r in records)
+
+
+# the parser over a whole report a real gcc wrote
+#
+# everything above this line reads text I typed out. these run the parser over
+# whatever gcc-15 says today, which is the only way to catch a wording that has
+# moved on since. they skip where there's no gcc, so the invariants have to
+# hold for any report rather than for one particular set of lines.
+
+
+def real_report(tmp_path: Path) -> str:
+    """A -O3 report from whatever real gcc is installed, or skip the test."""
+    gcc = real_gcc()
+    if gcc is None:
+        pytest.skip("no gcc that supports -fopt-info-all on this machine")
+
+    src = tmp_path / "loop.c"
+    src.write_text(LOOP_C)
+    return capture_opt_info(src, "3", gcc)
+
+
+def looks_located(line: str) -> bool:
+    """Whether a line carries one of gcc's three kind markers.
+
+    Deliberately cruder than REPORT_LINE — checking the parser against a copy
+    of itself would pass whatever it did. This only asks whether the line says
+    "optimized:" or one of its siblings anywhere, which is the thing a reader
+    would look for.
+    """
+    return any(f" {kind}: " in line for kind in KINDS)
+
+
+def test_the_real_report_is_worth_parsing(tmp_path: Path) -> None:
+    text = real_report(tmp_path)
+
+    # -O3 on a summable loop gives gcc passes that fire and passes that only
+    # have an opinion, so both kinds are in here and the tests below mean
+    # something. no "missed" — this loop vectorizes.
+    kinds = {record.kind for record in parse_opt_info(text)}
+    assert OPTIMIZED in kinds
+    assert NOTE in kinds
+
+
+def test_every_located_line_becomes_a_record(tmp_path: Path) -> None:
+    text = real_report(tmp_path)
+
+    located = [line for line in text.splitlines() if looks_located(line)]
+    assert len(parse_opt_info(text)) == len(located)
+
+
+def test_the_lines_left_behind_said_nothing_we_could_place(tmp_path: Path) -> None:
+    text = real_report(tmp_path)
+
+    # the chatter gcc mixes in is real output, not noise we invented, so it's
+    # worth knowing that what got dropped was only ever that
+    dropped = [line for line in text.splitlines() if parse_record(line) is None]
+    assert dropped
+    assert not any(looks_located(line) for line in dropped)
+
+
+def test_a_record_reads_back_where_gcc_put_it(tmp_path: Path) -> None:
+    text = real_report(tmp_path)
+
+    # where() rebuilds the position from the three fields, so if it comes back
+    # as the front of the line gcc wrote then the split was right — including
+    # the column, which is the part that's optional and easy to get wrong.
+    for line in text.splitlines():
+        record = parse_record(line)
+        if record is not None:
+            assert line.startswith(f"{record.where()}: {record.kind}: ")
+
+
+def test_no_real_record_arrives_with_a_pass_name(tmp_path: Path) -> None:
+    text = real_report(tmp_path)
+
+    # the field is there for clang's sake. anything filling it in from a gcc
+    # report would mean the wording had been guessed at.
+    assert all(record.pass_name is None for record in parse_opt_info(text))
+
+
+def test_the_messages_come_back_with_no_padding(tmp_path: Path) -> None:
+    text = real_report(tmp_path)
+
+    # gcc writes the inlining ones with a second space after the colon. every
+    # message should have lost it and none should have lost anything else.
+    for record in parse_opt_info(text):
+        assert record.message
+        assert record.message == record.message.strip()
