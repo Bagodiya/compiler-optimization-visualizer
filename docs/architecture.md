@@ -177,8 +177,9 @@ is something that stopped being there, and absence has no shape of its own.
 
 They report the shape they see rather than what the compiler says it did, so
 several of them can't separate an optimization from source that was written
-that way to begin with. Each docstring says which way it errs. Reading gcc's
-`-fopt-info` would settle those, and that's the obvious next step.
+that way to begin with. Each docstring says which way it errs. Asking the
+compiler instead is what `--report` does, and the two answers don't line up as
+neatly as I expected — `detected-vs-reported.md` goes through why.
 
 ### `annotate.py`
 What's left of the command once the detecting moved out: check the path, pick
@@ -200,14 +201,14 @@ circuits all of that, which is why the path argument is optional.
 
 ## Where this is going
 
-The detectors are the weak point, and they're weak in a known way: they read
-the assembly and infer, which means a handful of them can't tell an
-optimization from source that happened to be written that way. gcc will just
-tell you — `-fopt-info-inline` names the callee and the line it was inlined
-into, `-fopt-info-loop` says how many copies an unrolled body got. Parsing that
-and cross-referencing it against what the detectors found would turn most of
-the guesses into facts, and would catch the cases they miss outright (partial
-unrolling, a callee inlined at one call site but not another).
+Phase 5 built the other half of the annotate question: `report.py` reads gcc's
+`-fopt-info-all`, `remarks.py` reads clang's `-Rpass`, `crossref.py` matches
+either one's source lines to asm lines through the `.loc` directives, and
+`passes.py` picks between the two by handing a compiler a flag and seeing
+whether it's refused. `--report` prints the lot. What I got wrong going in was
+expecting the report to settle the detectors' guesses — mostly it talks about
+different optimizations altogether, which is `detected-vs-reported.md`.
 
-After that, a `report` command that runs the whole thing over a file and
-summarises per function, rather than one function at a time.
+Next is the cache in Phase 6, so a second run over an unchanged file doesn't
+compile it all over again. After that, a `report` command that summarises a
+whole file per function rather than one function at a time.
