@@ -30,3 +30,16 @@ def test_no_args_shows_help() -> None:
     # no_args_is_help means a bare invocation should still exit cleanly
     result = runner.invoke(app, [])
     assert "Usage" in result.stdout
+
+
+def test_info_flag() -> None:
+    result = runner.invoke(app, ["--info"])
+    assert result.exit_code == 0
+    assert f"compopt {__version__}" in result.stdout
+    assert "compilers:" in result.stdout
+
+
+def test_info_flag_needs_no_source_file() -> None:
+    # eager callback, so it answers without a path the way --version does
+    result = runner.invoke(app, ["--info"])
+    assert "Usage" not in result.stdout

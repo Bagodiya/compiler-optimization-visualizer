@@ -9,6 +9,7 @@ from compopt import __version__
 from compopt.annotate import run_annotate
 from compopt.compilers import CompileError
 from compopt.diff import run_diff
+from compopt.info import run_info
 from compopt.show import run_show
 
 app = typer.Typer(
@@ -30,6 +31,13 @@ def show_version(value: bool) -> None:
         raise typer.Exit()
 
 
+def show_info(value: bool) -> None:
+    # same trick as --version: neither of them wants a source file
+    if value:
+        run_info()
+        raise typer.Exit()
+
+
 @app.callback()
 def main(
     version: bool = typer.Option(
@@ -38,6 +46,13 @@ def main(
         "-V",
         help="Show the version and exit.",
         callback=show_version,
+        is_eager=True,
+    ),
+    info: bool = typer.Option(
+        False,
+        "--info",
+        help="Show the version and the compilers found on this machine.",
+        callback=show_info,
         is_eager=True,
     ),
 ) -> None:

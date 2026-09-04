@@ -171,3 +171,30 @@ def compile_at_levels(
             for level in levels
         }
         return {level: fut.result() for fut, level in futures.items()}
+
+
+def compiler_version(name: str) -> str:
+    """Ask a compiler what it is and hand back the one line worth printing.
+
+    `--version` is the spelling both gcc and clang answer to, and both put the
+    part you want on the first line — the rest is the target triple and the
+    install directory. Which is the whole point of printing it: the `gcc` on
+    this Mac says "Apple clang" when you ask, and nothing else we show tells
+    you that.
+
+    A compiler that fails or hangs here comes back as "unknown" instead of
+    raising. `--info` is what you run when something is already wrong, so it
+    has to survive one broken entry on PATH.
+    """
+    try:
+        result = subprocess.run(
+            [name, "--version"], capture_output=True, text=True, timeout=10
+        )
+    except (OSError, subprocess.SubprocessError):
+        return "unknown"
+
+    if result.returncode != 0:
+        return "unknown"
+
+    lines = result.stdout.strip().splitlines()
+    return lines[0].strip() if lines else "unknown"
