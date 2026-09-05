@@ -1,6 +1,8 @@
 """Figuring out which compilers we can actually use on this machine."""
 
 import os
+import platform
+import re
 import shutil
 import subprocess
 import tempfile
@@ -42,6 +44,76 @@ def find_compilers() -> list[str]:
     return found
 
 
+# gcc-15, clang-17, gcc-15.1 — a version stuck on the end and nothing else.
+# gcc-ar, clang++ and clang-format all start the same way and none of them
+# compiles anything, so matching the whole name is what keeps them out.
+SUFFIXED = re.compile(r"^(gcc|clang)-[0-9][0-9.]*$")
+
+
+def suffixed_compilers() -> list[str]:
+    """Find versioned compilers on PATH that find_compilers walks straight past.
+
+    Homebrew installs its gcc as `gcc-15` and leaves `gcc` alone, so a machine
+    can have a perfectly good compiler on PATH and still get told there isn't
+    one. We only look for the bare names, which is a real limitation and not
+    one the user can be expected to guess, so the error says the names it
+    found instead of pretending the machine is empty.
+
+    Only walked when we're already about to fail, so the cost doesn't matter.
+    """
+    found = set()
+    for entry in os.environ.get("PATH", "").split(os.pathsep):
+        if not entry:
+            continue
+        try:
+            names = os.listdir(entry)
+        except OSError:
+            # unreadable or missing PATH entries are normal, just skip them
+            continue
+        found.update(name for name in names if SUFFIXED.match(name))
+    return sorted(found)
+
+
+def install_hint() -> str:
+    """The line telling the user how to get a compiler on this kind of machine.
+
+    Three cases is as far as this is worth taking. macOS has one answer that
+    is nearly always right, Linux has one per distro so the message names two
+    and trusts the reader, and anything else gets told what's needed without
+    guessing at how.
+    """
+    match platform.system():
+        case "Darwin":
+            return "install the command line tools with: xcode-select --install"
+        case "Linux":
+            return "install one with your package manager, e.g. apt install gcc"
+        case _:
+            return "install gcc or clang and make sure it is on PATH"
+
+
+def no_compiler_lines() -> list[str]:
+    """Build the whole "nothing to compile with" message, one line per line.
+
+    Says what was looked for rather than just what wasn't found, because the
+    old wording ("could not find gcc or clang on PATH") reads like the machine
+    has no compiler when usually it means the one it has is named something
+    else. Anything suffixed gets listed, so `gcc-15` sitting there unused is
+    on screen instead of being something you have to already know about.
+
+    Returns lines so the tests can read them without capturing stderr.
+    """
+    lines = [
+        f"error: no compiler found — looked for {' and '.join(KNOWN_COMPILERS)} on PATH"
+    ]
+    nearby = suffixed_compilers()
+    if nearby:
+        lines.append(f"  PATH does have {', '.join(nearby)}, but only the bare")
+        lines.append("  names are used, so rename or symlink one of those into place")
+    else:
+        lines.append(f"  {install_hint()}")
+    return lines
+
+
 def normalize_level(level: str) -> str:
     """Take a level however the user spelled it and give back the bare digit.
 
@@ -71,6 +143,26 @@ def check_level(flag: str, level: str) -> None:
         raise typer.Exit(code=1)
 
 
+def report_bad_request(requested: str, available: list[str]) -> None:
+    """Explain a --compiler we can't honour and stop. Never returns.
+
+    Two different things go wrong here and the fix isn't the same for either.
+    A name we've never heard of stays broken however much you install, so it
+    gets told which names exist at all; a known compiler that just isn't here
+    gets the same install advice as having none. Lumping them together as
+    "not available on PATH" told the `--compiler tcc` case to go install tcc.
+    """
+    if requested not in KNOWN_COMPILERS:
+        typer.echo(f"error: don't know how to drive {requested}", err=True)
+        typer.echo(f"  --compiler takes one of: {', '.join(KNOWN_COMPILERS)}", err=True)
+    else:
+        typer.echo(f"error: {requested} is not on PATH", err=True)
+        if available:
+            typer.echo(f"  found instead: {', '.join(available)}", err=True)
+        typer.echo(f"  {install_hint()}", err=True)
+    raise typer.Exit(code=1)
+
+
 def pick_compiler(requested: str | None, available: list[str]) -> str:
     """Work out which compiler to actually run.
 
@@ -86,9 +178,7 @@ def pick_compiler(requested: str | None, available: list[str]) -> str:
     """
     if requested is not None:
         if requested not in available:
-            typer.echo(f"error: {requested} is not available on PATH", err=True)
-            typer.echo(f"available: {', '.join(available)}", err=True)
-            raise typer.Exit(code=1)
+            report_bad_request(requested, available)
         return requested
 
     env_cc = os.environ.get("CC")
@@ -114,7 +204,8 @@ def choose_compiler(requested: str | None) -> str:
     """
     available = find_compilers()
     if not available:
-        typer.echo("error: could not find gcc or clang on PATH", err=True)
+        for line in no_compiler_lines():
+            typer.echo(line, err=True)
         raise typer.Exit(code=1)
     return pick_compiler(requested, available)
 
