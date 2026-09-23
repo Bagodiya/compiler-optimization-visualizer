@@ -57,10 +57,17 @@ def real_clang() -> str | None:
 
     On macOS `gcc` is Apple clang wearing gcc's name, so this usually finds
     one under whichever name comes first.
+
+    The probe has to actually compile something. It used to pass
+    `--version`, but gcc prints its version and exits 0 even after
+    complaining about the flag, so on Linux real gcc got picked as clang.
     """
     for name in find_compilers():
         probe = subprocess.run(
-            [name, REMARK_FLAGS[0], "--version"], capture_output=True, text=True
+            [name, REMARK_FLAGS[0], "-fsyntax-only", "-x", "c", "-"],
+            input="",
+            capture_output=True,
+            text=True,
         )
         if probe.returncode == 0:
             return name
@@ -71,7 +78,18 @@ def real_clang() -> str | None:
 
 
 def test_spots_gcc_turning_the_flags_down() -> None:
-    msg = "gcc: error: unrecognized command-line option '-Rpass=.*'"
+    # copied out of the ubuntu CI log, curly quotes and all
+    msg = (
+        "gcc: error: unrecognized command-line option ‘-R’\n"
+        "gcc: error: unrecognized command-line option ‘-R’\n"
+        "gcc: error: unrecognized command-line option ‘-R’\n"
+        "gcc: error: unrecognized command-line option ‘-fno-caret-diagnostics’\n"
+    )
+    assert rejected_the_flags(msg)
+
+
+def test_still_spots_the_flag_quoted_whole() -> None:
+    msg = "cc: error: unknown argument: '-Rpass=.*'"
     assert rejected_the_flags(msg)
 
 

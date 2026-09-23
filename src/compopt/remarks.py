@@ -89,15 +89,19 @@ class RemarksUnsupported(Exception):
 def rejected_the_flags(message: str) -> bool:
     """Whether a failed run was the compiler turning the flags down.
 
-    gcc words it
+    Real gcc doesn't quote the flag back whole. It reads `-Rpass=.*` as `-R`
+    with an argument stuck on, so what it actually prints is
 
-        gcc: error: unrecognized command-line option '-Rpass=.*'
+        gcc: error: unrecognized command-line option '-R'
+        gcc: error: unrecognized command-line option '-fno-caret-diagnostics'
 
-    and quotes the flag back, so looking for our own flag name covers it
-    without having to know the wording. An error about the source names the
-    source, not a flag we passed.
+    (with curly quotes on Linux). `-R` on its own is too short to search for,
+    but gcc turns down the caret flag every time as well, and that one it
+    does print in full. `-Rpass` is still checked in case something else
+    quotes it properly. An error about the source names the source, not a
+    flag we passed.
     """
-    return "-Rpass" in message
+    return "-Rpass" in message or NO_CARET_FLAG in message
 
 
 def capture_remarks(source: Path, level: str, compiler: str) -> str:

@@ -297,7 +297,8 @@ def test_real_asm_has_a_file_table_and_loc_runs(tmp_path: Path) -> None:
     body = isolate_function(strip_directives(asm), "total")
     clean, origin = strip_debug_lines(body)
 
-    assert "loop.c" in table.values()
+    # ELF keeps the whole path in the one string, Mach-O splits it off
+    assert "loop.c" in {Path(name).name for name in table.values()}
     assert origin
     assert ".loc" not in clean
 
